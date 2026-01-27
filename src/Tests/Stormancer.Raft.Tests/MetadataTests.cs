@@ -6,12 +6,14 @@ namespace Stormancer.Raft.Tests
 {
     public class MockRecord : IRecord<MockRecord>
     {
+        public static MockRecord Instance { get; } = new MockRecord();
+
         public static bool TryRead(ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out MockRecord? record, out int length)
         {
             length = 10;
             if (buffer.Length >= 10)
             {
-                record = new MockRecord();
+                record = Instance;
                 return true;
             }
             else
@@ -20,6 +22,23 @@ namespace Stormancer.Raft.Tests
                 return false;
             }
         }
+
+        public static bool TryRead(ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out MockRecord? record, out int length)
+        {
+            length = 10;
+            if (buffer.Length >= 10)
+            {
+                record = Instance;
+                return true;
+            }
+            else
+            {
+                record = null;
+                return false;
+            }
+        }
+
+       
 
         public int GetLength()
         {
@@ -30,6 +49,12 @@ namespace Stormancer.Raft.Tests
         {
             return buffer.Length >= 10;
         }
+
+        public bool TryWrite(ref Span<byte> buffer, out int length)
+        {
+            length = 10;
+            return buffer.Length >= 10;
+        }
     }
 
     public class MetadataTests
@@ -38,7 +63,7 @@ namespace Stormancer.Raft.Tests
         [Fact]
         public void MetadataAddEntry()
         {
-            var metadata = new LogMetadata<MockRecord>();
+            var metadata = new WalMetadata<MockRecord>();
             Assert.True(metadata.TryAddEntry(0, 1, 1));
             Assert.False(metadata.TryAddEntry(0, 2, 1));
             Assert.True(metadata.TryAddEntry(0, 3, 2));
@@ -48,7 +73,7 @@ namespace Stormancer.Raft.Tests
         [Fact]
         public void TryGetTerm()
         {
-            var metadata = new LogMetadata<MockRecord>();
+            var metadata = new WalMetadata<MockRecord>();
             Assert.True(metadata.TryAddEntry(0, 1, 1));
             Assert.False(metadata.TryAddEntry(0, 2, 1));
             Assert.True(metadata.TryAddEntry(0, 3, 2));
@@ -63,7 +88,7 @@ namespace Stormancer.Raft.Tests
         [Fact]
         public void SerializeMetadataEmptyContent()
         {
-            var metadata = new LogMetadata<MockRecord>();
+            var metadata = new WalMetadata<MockRecord>();
 
             var pool = MemoryPool<byte>.Shared;
 
@@ -72,7 +97,7 @@ namespace Stormancer.Raft.Tests
             Assert.True(metadata.TryWrite(ref span, out var length));
             Assert.True(length == metadata.GetLength());
 
-            Assert.True(LogMetadata<MockRecord>.TryRead(new ReadOnlySequence<byte>(mem.Memory), out var metadata2, out length));
+            Assert.True(WalMetadata<MockRecord>.TryRead(new ReadOnlySequence<byte>(mem.Memory), out var metadata2, out length));
 
 
         }
@@ -80,7 +105,7 @@ namespace Stormancer.Raft.Tests
         [Fact]
         public void SerializeMetadataWithContent()
         {
-            var metadata = new LogMetadata<MockRecord>();
+            var metadata = new WalMetadata<MockRecord>();
             metadata.Content = new MockRecord();
             var pool = MemoryPool<byte>.Shared;
 
@@ -89,7 +114,7 @@ namespace Stormancer.Raft.Tests
             Assert.True(metadata.TryWrite(ref span, out var length));
             Assert.True(length == metadata.GetLength());
 
-            Assert.True(LogMetadata<MockRecord>.TryRead(new ReadOnlySequence<byte>(mem.Memory), out var metadata2, out length));
+            Assert.True(WalMetadata<MockRecord>.TryRead(new ReadOnlySequence<byte>(mem.Memory), out var metadata2, out length));
             Assert.NotNull(metadata.Content);
 
         }
@@ -97,7 +122,7 @@ namespace Stormancer.Raft.Tests
         [Fact]
         public void SerializeMetadataWithEntries()
         {
-            var metadata = new LogMetadata<MockRecord>();
+            var metadata = new WalMetadata<MockRecord>();
             metadata.TryAddEntry(0, 1, 1);
             metadata.TryAddEntry(0, 2, 1);
             metadata.TryAddEntry(0, 3, 2);
@@ -110,7 +135,7 @@ namespace Stormancer.Raft.Tests
             Assert.True(metadata.TryWrite(ref span, out var length));
             Assert.True(length == metadata.GetLength());
 
-            Assert.True(LogMetadata<MockRecord>.TryRead(new ReadOnlySequence<byte>(mem.Memory), out var metadata2, out length));
+            Assert.True(WalMetadata<MockRecord>.TryRead(new ReadOnlySequence<byte>(mem.Memory), out var metadata2, out length));
 
             Assert.True(metadata.TryGetTerm(2, out var term) && 1 == term);
 
@@ -128,8 +153,8 @@ namespace Stormancer.Raft.Tests
             var pool = MemoryPool<byte>.Shared;
 
             using var mem = pool.Rent(metadata.GetLength());
-
-            Assert.True(metadata.TryWrite(mem.Memory.Span));
+            var span = mem.Memory.Span;
+            Assert.True(metadata.TryWrite(ref span,out _));
 
             Assert.True(RaftMetadata.TryRead(new ReadOnlySequence<byte>(mem.Memory), out var m, out var l) && l == metadata.GetLength());
 

@@ -1,6 +1,8 @@
 ﻿using Stormancer.Raft.Storage;
 using System;
 using System.Collections.Generic;
+using System.ComponentModel.Design;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Runtime.Serialization;
 using System.Text;
@@ -37,6 +39,7 @@ namespace Stormancer.Raft.WAL
             _disposable.Dispose();
         }
     }
+  
     public class LogOptions
     {
         /// <summary>
@@ -47,8 +50,28 @@ namespace Stormancer.Raft.WAL
         public uint SegmentSize { get; set; } = 16 * 1024 * 1024;
         public uint PageSize { get; set; } = 8 * 1024;
         public required IWALStorageProvider Storage { get; set; }
-
     }
+
+    /// <summary>
+    /// Error returned by <see cref="WriteAheadLog{TMetadataContent}.TryAppendEntries(IEnumerable{LogEntry}, out AppendEntryError? error)"/>
+    /// </summary>
+    public class AppendEntryError
+    {
+        internal AppendEntryError(ErrorId error, LogEntry failedEntry)
+        {
+            Error = error;
+            FailedEntry = failedEntry;
+        }
+
+        public ErrorId Error { get; }
+
+        public LogEntry FailedEntry { get; }
+    }
+
+    /// <summary>
+    /// A write ahead log implementation (WAL)
+    /// </summary>
+    /// <typeparam name="TMetadataContent">Type representing metadata stored in the WAL</typeparam>
     public class WriteAheadLog<TMetadataContent> : IAsyncDisposable
         where TMetadataContent : IRecord<TMetadataContent>
     {
@@ -56,7 +79,7 @@ namespace Stormancer.Raft.WAL
         private readonly string _category;
         private readonly LogOptions _options;
         private IWALSegment _currentSegment;
-        private readonly LogMetadata<TMetadataContent> _metadata;
+        private readonly WalMetadata<TMetadataContent> _metadata;
 
         private IWALStorageProvider _segmentProvider;
         private Dictionary<int, IWALSegment> _openedSegments = new Dictionary<int, IWALSegment>();
@@ -202,25 +225,67 @@ namespace Stormancer.Raft.WAL
 
 
         }
+        public bool TryAppendEntry(LogEntry entry, out ErrorId? error)
+        {
+            var segment = GetCurrentSegment();
+            int offset = 0;
 
-        public void AppendEntries(IEnumerable<LogEntry> logEntries)
+            while (!TryAppendEntry(segment, entry, ref offset, out error))
+            {
+                if (error == WalErrors.SegmentFull)
+                {
+                    segment = CreateNewSegmentIfRequired(segment);
+                }
+                else if (error == WalErrors.ContentPartialWrite)
+                {
+                    //Keep writing.
+                }
+                else
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        public bool TryAppendEntries(IEnumerable<LogEntry> logEntries, out AppendEntryError? error)
         {
             var segment = GetCurrentSegment();
             foreach (var entry in logEntries)
             {
-                while (!TryAppendEntry(segment, entry))
+                int offset = 0;
+                ErrorId? e;
+                while (!TryAppendEntry(segment, entry, ref offset, out e))
                 {
-                    segment = CreateNewSegmentIfRequired(segment);
+                    if (e == WalErrors.SegmentFull)
+                    {
+                        segment = CreateNewSegmentIfRequired(segment);
+                    }
+                    else if (e == WalErrors.ContentPartialWrite)
+                    {
+                        //Keep writing.
+                    }
+                    else
+                    {
+                        error = new AppendEntryError(e, entry);
+                        return false;
+                    }
                 }
             }
+            error = null;
+            return true;
         }
 
 
 
-        private bool TryAppendEntry(IWALSegment segment, LogEntry entry) 
+        private bool TryAppendEntry(IWALSegment segment, LogEntry entry, ref int offset, [NotNullWhen(false)] out ErrorId? error)
         {
 
-            if (segment.TryAppendEntry(entry))
+            if(segment.GetLastEntryHeader().EntryId != entry.Id -1)
+            {
+                error = WalErrors.NonConsecutiveEntryId;
+                return false;
+            }
+            if (segment.TryAppendEntry(entry, ref offset, out error))
             {
                 if (_metadata.TryAddEntry(segment.SegmentId, entry.Id, entry.Term))
                 {
@@ -283,7 +348,7 @@ namespace Stormancer.Raft.WAL
 
         }
 
-        private LogMetadata<TMetadataContent> LoadMetadata()
+        private WalMetadata<TMetadataContent> LoadMetadata()
         {
             if (_segmentProvider.TryReadMetadata<TMetadataContent>(out var metadata))
             {
@@ -291,7 +356,7 @@ namespace Stormancer.Raft.WAL
             }
             else
             {
-                return new LogMetadata<TMetadataContent>();
+                return new WalMetadata<TMetadataContent>();
             }
         }
 
@@ -367,11 +432,18 @@ namespace Stormancer.Raft.WAL
 
         ValueTask<WalSegmentGetEntriesResult> GetEntries(ulong firstEntry, ulong lastEntry);
 
-        bool TryAppendEntry(LogEntry logEntry);
+        /// <summary>
+        /// Appends an entry in the log. If the entry is too long to be included entirely in the page, offset contains the offset in the entry of the 
+        /// </summary>
+        /// <param name="logEntry"></param>
+        /// <param name="offset"></param>
+        /// <param name="error"></param>
+        /// <returns></returns>
+        bool TryAppendEntry(LogEntry logEntry, ref int offset, [NotNullWhen(false)] out ErrorId? error);
 
         ValueTask<LogEntryHeader> GetEntryHeader(ulong firstEntry);
 
-        bool TryTruncateEnd(ulong newLastEntryId);
+        bool TryTruncateEnd( ulong newLastEntryId);
         void SetReadOnly();
         LogEntryHeader GetLastEntryHeader();
         void Delete();

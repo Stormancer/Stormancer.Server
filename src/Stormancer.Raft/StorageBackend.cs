@@ -8,8 +8,7 @@ namespace Stormancer.Raft
 {
     
 
-    public interface IStorageShardBackend<TCommand, TCommandResult>
-        where TCommand : ICommand<TCommand>
+    public interface IStorageShardBackend<TCommandResult>
        where TCommandResult : ICommandResult<TCommandResult>
     {
         ulong LastAppliedLogEntry { get; }
@@ -21,7 +20,7 @@ namespace Stormancer.Raft
 
 
 
-        bool TryAppendCommand(TCommand command, [NotNullWhen(true)] out LogEntry? entry, [NotNullWhen(false)] out Error? error);
+        bool TryAppendCommand(RaftCommand command, [NotNullWhen(true)] out LogEntry? entry, [NotNullWhen(false)] out Error? error);
         
         bool TryAppendEntries(IEnumerable<LogEntry> entries);
 

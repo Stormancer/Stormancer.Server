@@ -62,15 +62,11 @@ namespace Stormancer
 
         private static Dictionary<int, ErrorId> _errors = new();
 
-        /// <summary>
-        /// No primary shard available to process the operation.
-        /// </summary>
-        public static ErrorId NotAvailable { get; } = Register(503, "notAvailable", "No primary shard available to process the operation.");
-
+        
         /// <summary>
         /// The error id is not registered.
         /// </summary>
-        public static ErrorId UnknownError { get; } = Register(1, "unknown", "The error id is not registered.");
+        public static ErrorId UnknownError { get; } = Errors.Register(1, "unknown", "The error id is not registered.");
 
 
         public static ErrorId Register(int code, string id, string description)

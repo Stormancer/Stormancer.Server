@@ -10,24 +10,58 @@ using System.Runtime.CompilerServices;
 namespace Stormancer.Raft
 {
 
-    internal class NoOpSystemCommand
+    internal class NoOpSystemRecord : IRecord<NoOpSystemRecord>
     {
-        private NoOpSystemCommand() { }
-        public static NoOpSystemCommand Instance { get; } = new NoOpSystemCommand();
-    }
+        private NoOpSystemRecord() { }
+        public static NoOpSystemRecord Instance { get; } = new NoOpSystemRecord();
 
+        public static bool TryRead(ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out NoOpSystemRecord? record, out int length)
+        {
+            throw new NotImplementedException();
+        }
+
+        public static bool TryRead(ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out NoOpSystemRecord? record, out int length)
+        {
+            throw new NotImplementedException();
+        }
+
+        public int GetLength()
+        {
+            throw new NotImplementedException();
+        }
+
+        public bool TryWrite(ref Span<byte> buffer, out int length)
+        {
+            throw new NotImplementedException();
+        }
+    }
+    public class RaftCommand
+    {
+        public Guid Id { get; } = Guid.NewGuid();
+
+
+        public IRecord Record { get; }
+
+        private RaftCommand(IRecord record)
+        {
+            Record = record;
+        }
+
+        public static RaftCommand Create(IRecord record)
+        {
+            return new RaftCommand(record);
+        }
+
+        public TSystemCommandContent? As<TSystemCommandContent>() where TSystemCommandContent : class, IRecord<TSystemCommandContent>
+        {
+            return Record as TSystemCommandContent;
+        }
+    }
     public interface ICommand<T> where T : ICommand<T>
     {
         Guid Id { get; }
-
-        int GetLength();
-        void Write(Span<byte> span);
-        static abstract bool TryRead(ReadOnlySequence<byte> buffer, out int bytesRead, [NotNullWhen(true)] out T? operation);
-
-
-        bool IsSystem { get; }
-        TSystemCommandContent AsSystem<TSystemCommandContent>() where TSystemCommandContent : IRecord<TSystemCommandContent>;
-        static abstract T CreateSystemCommand(object? systemCommand);
+        TSystemCommandContent? As<TSystemCommandContent>() where TSystemCommandContent : class, IRecord<TSystemCommandContent>;
+        static abstract T Create(IRecord systemRecord);
     }
 
     public interface ICommandResult<T> where T : ICommandResult<T>
@@ -55,8 +89,7 @@ namespace Stormancer.Raft
 
 
 
-    public class ReplicatedStorageShard<TCommand, TCommandResult> : IReplicatedStorageMessageHandler
-    where TCommand : ICommand<TCommand>
+    public class ReplicatedStorageShard<TCommandResult> : IReplicatedStorageMessageHandler
     where TCommandResult : ICommandResult<TCommandResult>
 
     {
@@ -85,7 +118,7 @@ namespace Stormancer.Raft
         private Guid? _votedFor = null;
 
         private readonly IReplicatedStorageMessageChannel? _channel;
-        private readonly IStorageShardBackend<TCommand, TCommandResult> _backend;
+        private readonly IStorageShardBackend<TCommandResult> _backend;
 
         private readonly ReplicatedStorageShardConfiguration _config;
 
@@ -99,8 +132,8 @@ namespace Stormancer.Raft
         public ReplicatedStorageShard(Guid shardUid,
             ReplicatedStorageShardConfiguration config,
             ILoggerFactory logger,
-            IReplicatedStorageMessageChannel channel,
-            IStorageShardBackend<TCommand, TCommandResult> backend
+            IReplicatedStorageMessageChannel? channel,
+            IStorageShardBackend<TCommandResult> backend
             )
         {
             ArgumentNullException.ThrowIfNull(config, nameof(config));
@@ -115,7 +148,7 @@ namespace Stormancer.Raft
 
 
 
-        public ValueTask<TCommandResult> ExecuteCommand(TCommand command)
+        public ValueTask<TCommandResult> ExecuteCommand(RaftCommand command)
         {
             ShardsReplicationLogging.LogStartProcessingCommand(_logger, command.Id);
 
@@ -153,7 +186,7 @@ namespace Stormancer.Raft
             if (IsLeader)
             {
 
-                if (_backend.TryAppendCommand(TCommand.CreateSystemCommand(NoOpSystemCommand.Instance), out var entry, out var error))
+                if (_backend.TryAppendCommand(TCommand.Create(NoOpSystemRecord.Instance), out var entry, out var error))
                 {
                     var task = _backend.WaitCommittedAsync(entry.Id);
                     if (!AppendEntriesToReplica(false))
@@ -206,7 +239,7 @@ namespace Stormancer.Raft
             lock (_syncRoot)
             {
 
-                if (_backend.TryAppendCommand(TCommand.CreateSystemCommand(record), out var entry, out var error))
+                if (_backend.TryAppendCommand(TCommand.Create(record), out var entry, out var error))
                 {
                     task = _backend.WaitCommittedAsync(entry.Id);
                     if (!AppendEntriesToReplica(false))
@@ -227,7 +260,7 @@ namespace Stormancer.Raft
         private Dictionary<Guid, AsyncOperation<TCommandResult>> _forwardedCommands = new Dictionary<Guid, AsyncOperation<TCommandResult>>();
 
         private ObjectPool<AsyncOperation<TCommandResult>> _operationPool = new DefaultObjectPool<AsyncOperation<TCommandResult>>(new AsyncOperationPoolPolicy<TCommandResult>());
-        private ValueTask<TCommandResult> ForwardCommand(TCommand command)
+        private ValueTask<TCommandResult> ForwardCommand(RaftCommand command)
         {
             if (IsLeader)
             {
@@ -235,7 +268,7 @@ namespace Stormancer.Raft
             }
             else if (LeaderUid == null)
             {
-                return ValueTask.FromResult(TCommandResult.CreateFailed(command.Id, new Error(Errors.NotAvailable, null)));
+                return ValueTask.FromResult(TCommandResult.CreateFailed(command.Id, new Error(RaftErrors.NotAvailable, null)));
             }
             else if (_channel != null)
             {
@@ -243,20 +276,23 @@ namespace Stormancer.Raft
             }
             else
             {
-                return ValueTask.FromResult(TCommandResult.CreateFailed(command.Id, new Error(Errors.NotAvailable, "communication channel unavailable.")));
+                return ValueTask.FromResult(TCommandResult.CreateFailed(command.Id, new Error(RaftErrors.NotAvailable, "communication channel unavailable.")));
             }
         }
 
-        private ValueTask<TCommandResult> ForwardCommandImpl(TCommand command)
+        private ValueTask<TCommandResult> ForwardCommandImpl(RaftCommand command)
         {
+            var id = command.Id;
             Debug.Assert(LeaderUid != null && _channel != null);
             var op = _operationPool.Get();
+            Debug.Assert(op.TryOwnAndReset());
             lock (_syncRoot)
             {
-                _forwardedCommands.Add(command.Id, op);
+                _forwardedCommands.Add(id, op);
 
             }
-            var length = command.GetLength();
+           
+            var length = _config.ReaderWriter.GetContentLength(command.Record);
 
 
             if (length < 128)
@@ -274,9 +310,21 @@ namespace Stormancer.Raft
                 _channel.ForwardOperationToPrimary(ShardUid, LeaderUid.Value, ref span);
             }
 
+            async ValueTask<TCommandResult> ProcessTaskCompletion(Guid id, AsyncOperation<TCommandResult> asyncOperation)
+            {
+                try
+                {
+                    return await asyncOperation.ValueTaskOfT;
+                }
+                finally
+                {
+                    _forwardedCommands.Remove(id);
+                    _operationPool.Return(asyncOperation);
+                }
+            };
 
+            return ProcessTaskCompletion(id,op);
 
-            return op.ValueTaskOfT;
         }
 
 
@@ -352,12 +400,12 @@ namespace Stormancer.Raft
 
 
 
-              
+
                 var getEntriesResult = await _backend.GetEntries(firstEntryId, lastEntryId);
                 var entries = getEntriesResult.Entries;
 
                 ulong prevLogEntryId = getEntriesResult.PrevLogEntryId;
-                ulong prevLogEntryTerm= getEntriesResult.PrevLogEntryTerm;
+                ulong prevLogEntryTerm = getEntriesResult.PrevLogEntryTerm;
                 firstEntryId = getEntriesResult.FirstEntryId;
                 lastEntryId = getEntriesResult.LastEntryId;
 
@@ -503,11 +551,10 @@ namespace Stormancer.Raft
                 LastAppliedLogEntryId = _backend.LastAppliedLogEntry,
             };
         }
-        public AppendEntriesResult OnAppendEntries(ulong term, Guid leaderId, IEnumerable<LogEntry> entries, ulong lastLeaderEntryId, ulong prevLogIndex, ulong prevLogTerm, ulong leaderCommit)
+        AppendEntriesResult IReplicatedStorageMessageHandler.OnAppendEntries(ulong term, Guid leaderId, IEnumerable<LogEntry> entries, ulong lastLeaderEntryId, ulong prevLogIndex, ulong prevLogTerm, ulong leaderCommit)
         {
 
-            /*
-             * Receiver implementation:
+            /*  Receiver implementation:
                 1. Reply false if term < currentTerm (§5.1)
                 2. Reply false if log doesn't contain an entry at prevLogIndex
                 whose term matches prevLogTerm (§5.3)
@@ -566,7 +613,7 @@ namespace Stormancer.Raft
 
         }
 
-        public void OnAppendEntriesResult(Guid origin, Guid? leaderId, ulong term, ulong firstLogEntryInRequest, ulong lastLogEntry, ulong lastReplicatedIndex, bool success)
+        void IReplicatedStorageMessageHandler.OnAppendEntriesResult(Guid origin, Guid? leaderId, ulong term, ulong firstLogEntryInRequest, ulong lastLogEntry, ulong lastReplicatedIndex, bool success)
         {
 
 
@@ -712,12 +759,17 @@ namespace Stormancer.Raft
 
         public void ProcessForwardOperationResponse(Guid originUid, ReadOnlySequence<byte> responseInput, out int bytesRead)
         {
-            throw new NotImplementedException();
+            if (TCommandResult.TryRead(responseInput, out bytesRead, out var result) && _forwardedCommands.TryGetValue(result.OperationId, out var asyncOperation))
+            {
+                asyncOperation.TrySetResult(result);
+
+            }
         }
 
         private bool TrySetAsLeader()
         {
-            if (!_backend.CurrentShardsConfiguration.IsVoting(ShardUid))
+            
+            if (_channel !=null &&  !_backend.CurrentShardsConfiguration.IsVoting(ShardUid))
             {
                 return false;
             }
@@ -759,15 +811,17 @@ namespace Stormancer.Raft
             {
                 return ValueTask.FromResult(true);
             }
-            if (!IsShardVoting(ShardUid))
-            {
-                return ValueTask.FromResult(false);
-            }
             if (_channel == null)
             {
 
                 return ValueTask.FromResult(TrySetAsLeader());
             }
+
+            if (!IsShardVoting(ShardUid))
+            {
+                return ValueTask.FromResult(false);
+            }
+            
 
             if (_electAsLeaderOperation != null)
             {
@@ -849,7 +903,7 @@ namespace Stormancer.Raft
             ShardsReplicationLogging.SendingRequestVoteResult(_logger, ShardUid, candidateId, voteGranted, _votedFor, _backend.CurrentTerm, _backend.LastLogEntry, _backend.LastLogEntryTerm);
             return new RequestVoteResult { Term = _backend.CurrentTerm, VoteGranted = voteGranted };
         }
-        public RequestVoteResult OnRequestVote(ulong term, Guid candidateId, ulong lastLogIndex, ulong lastLogTerm)
+        RequestVoteResult IReplicatedStorageMessageHandler.OnRequestVote(ulong term, Guid candidateId, ulong lastLogIndex, ulong lastLogTerm)
         {
             lock (_syncRoot)
             {

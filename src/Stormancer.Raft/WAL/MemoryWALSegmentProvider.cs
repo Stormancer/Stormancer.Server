@@ -4,21 +4,33 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading.Tasks;
 
 namespace Stormancer.Raft.WAL
 {
+
     public class MemoryWALSegmentOptions
     {
-      
+
         public int PageSize { get; init; } = 1024;
         public int PagesPerSegment { get; init; } = 256;
 
         public MemoryPool<byte> MemoryPool { get; init; } = MemoryPool<byte>.Shared;
 
         public required ILogEntryReaderWriter ReaderWriter { get; init; }
+    }
+
+    class MemoryWALReadOnlySequenceSegment : ReadOnlySequenceSegment<byte>
+    {
+        public MemoryWALReadOnlySequenceSegment(ReadOnlyMemory<byte> memory, ReadOnlySequenceSegment<byte> next, int runningIndex)
+        {
+            Memory = memory;
+            Next = next;
+            RunningIndex = runningIndex;
+        }
     }
 
     public class MemoryWALSegmentProvider : IWALStorageProvider
@@ -39,14 +51,14 @@ namespace Stormancer.Raft.WAL
             return new MemoryWALSegment(category, segmentId, _options);
         }
 
-        public bool TryReadMetadata<TMetadataContent>([NotNullWhen(true)] out LogMetadata<TMetadataContent>? metadata) where TMetadataContent : IRecord<TMetadataContent>
+        public bool TryReadMetadata<TMetadataContent>([NotNullWhen(true)] out WalMetadata<TMetadataContent>? metadata) where TMetadataContent : IRecord<TMetadataContent>
         {
-            lock(_lock)
+            lock (_lock)
             {
 
-                if(_metadataBuffer !=null)
+                if (_metadataBuffer != null)
                 {
-                    return LogMetadata<TMetadataContent>.TryRead(new ReadOnlySequence<byte>(_metadataBuffer.Value), out metadata, out var _);
+                    return WalMetadata<TMetadataContent>.TryRead(new ReadOnlySequence<byte>(_metadataBuffer.Value), out metadata, out var _);
                 }
                 else
                 {
@@ -56,19 +68,19 @@ namespace Stormancer.Raft.WAL
             }
         }
 
-        public void SaveMetadata<TMetadataContent>(LogMetadata<TMetadataContent> metadata) where TMetadataContent : IRecord<TMetadataContent>
+        public void SaveMetadata<TMetadataContent>(WalMetadata<TMetadataContent> metadata) where TMetadataContent : IRecord<TMetadataContent>
         {
-           lock(_lock)
+            lock (_lock)
             {
-                if(_metadataMemOwner != null)
+                if (_metadataMemOwner != null)
                 {
                     _metadataMemOwner.Dispose();
                 }
-                _metadataMemOwner= _options.MemoryPool.Rent(metadata.GetLength());
+                _metadataMemOwner = _options.MemoryPool.Rent(metadata.GetLength());
 
                 var buffer = _metadataMemOwner.Memory.Span;
 
-                if(metadata.TryWrite(ref buffer, out var length))
+                if (metadata.TryWrite(ref buffer, out var length))
                 {
                     _metadataBuffer = _metadataMemOwner.Memory.Slice(0, length);
                 }
@@ -86,17 +98,17 @@ namespace Stormancer.Raft.WAL
 
             private readonly IMemoryOwner<byte> _pageBufferOwner;
 
-          
+
 
             public MemoryPage(int id, IMemoryOwner<byte> pageBufferOwner)
             {
                 Id = id;
                 _pageBufferOwner = pageBufferOwner;
-                
+                Size = _pageBufferOwner.Memory.Length;
 
             }
 
-            public int Size => _pageBufferOwner.Memory.Length;
+            public int Size { get; }
             public int Offset { get; private set; } = 0;
             public int Remaining => Size - Offset;
 
@@ -147,13 +159,13 @@ namespace Stormancer.Raft.WAL
                 return _pageBufferOwner.Memory.Span.Slice(Offset, sizeHint);
             }
 
-            public ReadOnlySpan<byte> GetContent(int offset, int length)
+            public ReadOnlyMemory<byte> GetContent(int offset, int length)
             {
                 if (offset + length > Offset)
                 {
                     throw new ArgumentException("offset+length> Offset");
                 }
-                var span = _pageBufferOwner.Memory.Span.Slice(offset, length);
+                var span = _pageBufferOwner.Memory.Slice(offset, length);
                 return span;
             }
 
@@ -164,6 +176,13 @@ namespace Stormancer.Raft.WAL
         }
         private class MemoryWALSegment : IWALSegment
         {
+            [Flags]
+            private enum IndexRecordFlags : byte
+            {
+                None = 0,
+                RecordStart = 1,
+                RecordEnd = 2
+            }
             private struct IndexRecord
             {
                 public required ulong Term { get; set; }
@@ -172,7 +191,9 @@ namespace Stormancer.Raft.WAL
                 public required int ContentOffset { get; set; }
                 public required int ContentLength { get; set; }
 
-                public static int Length => 8 + 8 + 4 + 4 + 4;
+                public required IndexRecordFlags Flags { get; set; }
+
+                public const int Length = 8 + 8 + 4 + 4 + 4 + 1;
 
                 public static bool TryRead(ref ReadOnlySpan<byte> buffer, out IndexRecord value)
                 {
@@ -188,7 +209,8 @@ namespace Stormancer.Raft.WAL
                         EntryId = BinaryPrimitives.ReadUInt64BigEndian(buffer[8..16]),
                         ContentPageId = BinaryPrimitives.ReadInt32BigEndian(buffer[16..20]),
                         ContentOffset = BinaryPrimitives.ReadInt32BigEndian(buffer[20..24]),
-                        ContentLength = BinaryPrimitives.ReadInt32BigEndian(buffer[24..28])
+                        ContentLength = BinaryPrimitives.ReadInt32BigEndian(buffer[24..28]),
+                        Flags = (IndexRecordFlags)buffer[28]
                     };
                     return true;
                 }
@@ -205,6 +227,7 @@ namespace Stormancer.Raft.WAL
                     BinaryPrimitives.WriteInt32BigEndian(span[16..20], ContentPageId);
                     BinaryPrimitives.WriteInt32BigEndian(span[20..24], ContentOffset);
                     BinaryPrimitives.WriteInt32BigEndian(span[24..28], ContentLength);
+                    span[28] = (byte)Flags;
                     return true;
                 }
             }
@@ -244,7 +267,7 @@ namespace Stormancer.Raft.WAL
             private bool TryCreateNewIndexPage()
             {
                 var id = _currentIndexPage != null ? _currentIndexPage.Id + 1 : 0;
-                _currentIndexPage = new MemoryPage( id, _options.MemoryPool.Rent(_options.PageSize));
+                _currentIndexPage = new MemoryPage(id, _options.MemoryPool.Rent(_options.PageSize));
                 _indexPages.Add(_currentIndexPage);
                 return true;
             }
@@ -253,7 +276,7 @@ namespace Stormancer.Raft.WAL
             private bool TryCreateNewContentPage()
             {
                 var id = _currentContentPage != null ? _currentContentPage.Id + 1 : 0;
-                _currentContentPage = new MemoryPage( id, _options.MemoryPool.Rent(_options.PageSize));
+                _currentContentPage = new MemoryPage(id, _options.MemoryPool.Rent(_options.PageSize));
                 _contentPages.Add(_currentContentPage);
                 return true;
             }
@@ -268,11 +291,11 @@ namespace Stormancer.Raft.WAL
             public ValueTask DisposeAsync()
             {
                 Delete();
-                
+
                 return ValueTask.CompletedTask;
             }
 
-            public ValueTask<WalSegmentGetEntriesResult> GetEntries(ulong firstEntryId, ulong lastEntryId) 
+            public ValueTask<WalSegmentGetEntriesResult> GetEntries(ulong firstEntryId, ulong lastEntryId)
             {
                 if (!HasRecords())
                 {
@@ -308,37 +331,126 @@ namespace Stormancer.Raft.WAL
 
                 IEnumerable<LogEntry> EnumerateEntries(ulong firstEntryId, ulong lastEntryId)
                 {
-                    for (var index = firstEntryId; index <= lastEntryId; index++)
+                    if (!TryGetEntryHeader(firstEntryId, out int pageId, out int offset, out var header))
                     {
-                        if (!TryGetEntryHeader(index, out var header))
+                        yield break;
+                    }
+
+
+                    while (header.EntryId <= lastEntryId)
+                    {
+
+                        if (TryGetLogEntry(header, out LogEntry? entry))
                         {
-                            lastEntryId = index - 1;
-                            yield break;
+                            yield return entry;
                         }
-                        else
+                        if(!TryAdvanceIndex(ref pageId, ref offset))
                         {
-                            yield return GetLogEntry(header);
+                            break;
+                        }
+                        if (!TryGetEntryHeader(pageId, offset, out header))
+                        {
+                            break;
                         }
                     }
+
+
+
                 }
 
                 return ValueTask.FromResult(new WalSegmentGetEntriesResult(EnumerateEntries(firstEntryId, lastEntryId), firstEntryId, lastEntryId, _segmentState));
 
             }
 
-            private LogEntry GetLogEntry(IndexRecord header)
+            private bool TryAdvanceIndex(ref int pageId, ref int offset)
             {
-                var contentPage = _contentPages[header.ContentPageId];
-
-                var content = contentPage.GetContent(header.ContentOffset, header.ContentLength);
-
-                if (_options.ReaderWriter.TryRead(header.EntryId, header.Term,ref content, out var entry, out var length))
+                if(pageId >= _indexPages.Count)
                 {
-                    return entry;
+                    return false;
                 }
-                else
+
+                var page = _indexPages[pageId];
+                var recordLength = IndexRecord.Length;
+                if (page.Offset >= offset+2*recordLength)
                 {
-                    throw new InvalidOperationException("Failed to read entry.");
+                    offset += recordLength;
+                    return true;
+                }
+                else //change page
+                {
+                    if(pageId+1 >= _indexPages.Count)
+                    {
+                        return false;
+                    }
+                    page = _indexPages[pageId+1];
+
+                    if(page.Offset < recordLength)
+                    {
+                        return false;
+                    }
+
+                    pageId++;
+                    offset = 0;
+                    return true;
+                }
+
+            }
+
+          
+            /// <summary>
+            /// Tries getting a log entry from an header object. If the entry spans multiple records, advances pageId & offset to the last record of the entry.
+            /// </summary>
+            /// <param name="header"></param>
+            /// <param name="pageId"></param>
+            /// <param name="offset"></param>
+            /// <returns></returns>
+            /// <exception cref="InvalidOperationException"></exception>
+            private bool TryGetLogEntry(IndexRecord header,[NotNullWhen(true)] out LogEntry? entry)
+            {
+                //Need to implement support for entries on multiple records
+                
+                if(!header.Flags.HasFlag(IndexRecordFlags.RecordStart)) //if not a start record, we should skip
+                {
+                    entry = null;
+                    return false;
+                }
+
+                if (header.Flags.HasFlag(IndexRecordFlags.RecordEnd)) //Single segment
+                {
+                    var contentPage = _contentPages[header.ContentPageId];
+
+                    var content = contentPage.GetContent(header.ContentOffset, header.ContentLength);
+                
+                    ReadOnlySequence<byte> contentBuffer = new(content);
+
+                    if (_options.ReaderWriter.TryRead(header.EntryId, header.Term, contentBuffer, out entry))
+                    {
+                        return true;
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+                else //multiple segments.
+                {
+                    throw new NotImplementedException("multisegment content not supported");
+                    
+                    //ReadOnlySequenceSegment<byte> firstSegment = new MemoryWALReadOnlySequenceSegment<byte>()
+                    //ReadOnlySequenceSegment<byte> lastSegment;
+
+
+                    //int lastIndex;
+                    //ReadOnlySequence<byte> contentBuffer = new(firstSegment, 0, lastSegment, lastIndex);
+                    //if (_options.ReaderWriter.TryRead(header.EntryId, header.Term, contentBuffer, out entry))
+                    //{
+                    //    return true;
+                    //}
+                    //else
+                    //{
+                    //    return false;
+                    //}
+
                 }
 
             }
@@ -362,44 +474,111 @@ namespace Stormancer.Raft.WAL
                 var length = IndexRecord.Length;
                 var entriesPerPage = _options.PageSize / length;
                 var firstEntryInSegment = _firstRecord.Value;
-
-                var delta = (int)(entryId - firstEntryInSegment.EntryId);
-
-                pageId = delta / entriesPerPage;
-
-                if (_indexPages.Count <= pageId)
+                if (firstEntryInSegment.EntryId > entryId)
                 {
                     pageId = 0;
                     offset = 0;
                     return false;
                 }
 
-                var indexInPage = delta - pageId * entriesPerPage;
-
-                offset = indexInPage * length;
-                return true;
-
-            }
-            private bool TryGetEntryHeader(ulong entryId, out IndexRecord header)
-            {
-                if (TryGetIndexPosition(entryId, out var entryIdPage, out var entryIdOffset) && entryIdPage < _indexPages.Count)
+                if (_lastRecord != null && entryId > _lastRecord.Value.EntryId)
                 {
+                    pageId = 0;
+                    offset = 0;
+                    return false;
+                }
 
-                    var span = _indexPages[entryIdPage].GetContent(entryIdOffset, IndexRecord.Length);
-                    if (IndexRecord.TryRead(ref span, out var record))
+                MemoryPage? currentPage = null;
+
+                foreach (var page in _indexPages) //Find page
+                {
+                    if (currentPage == null)
                     {
-                        header = record;
+                        currentPage = page;
+                    }
+                    else
+                    {
+                        var span = page.GetContent(0, IndexRecord.Length).Span;
+                        if (!IndexRecord.TryRead(ref span, out var indexRecord) || indexRecord.EntryId > entryId)
+                        {
+                            break;
+                        }
+                        else
+                        {
+
+                            currentPage = page;
+                        }
+                    }
+                }
+                if (currentPage == null)
+                {
+                    pageId = 0;
+                    offset = 0;
+                    return false;
+                }
+
+
+                for (offset = 0; offset < currentPage.Size; offset += IndexRecord.Length)
+                {
+                    var span = currentPage.GetContent(offset, IndexRecord.Length).Span;
+                    if (IndexRecord.TryRead(ref span, out var indexRecord) && indexRecord.EntryId == entryId)
+                    {
+                        pageId = currentPage.Id;
                         return true;
                     }
                 }
 
-                header = default;
+                pageId = 0;
+                offset = 0;
                 return false;
+
+
+            }
+
+            private bool TryGetEntryHeader(int pageId, int offset, out IndexRecord header)
+            {
+                if (_indexPages.Count < pageId)
+                {
+                    header = default;
+                    return false;
+                }
+                var page = _indexPages[pageId];
+
+                if (offset + IndexRecord.Length > page.Size)
+                {
+                    header = default;
+                    return false;
+                }
+
+                var span = page.GetContent(offset, IndexRecord.Length).Span;
+                if (IndexRecord.TryRead(ref span, out var record))
+                {
+                    header = record;
+                    return true;
+                }
+                else
+                {
+                    header = default;
+                    return false;
+                }
+            }
+
+            private bool TryGetEntryHeader(ulong entryId, out int pageId, out int offset, out IndexRecord header)
+            {
+                if (TryGetIndexPosition(entryId, out pageId, out offset) && pageId < _indexPages.Count && TryGetEntryHeader(pageId, offset, out header))
+                {
+                    return true;
+                }
+                else
+                {
+                    header = default;
+                    return false;
+                }
 
             }
             public ValueTask<LogEntryHeader> GetEntryHeader(ulong entryId)
             {
-                if (TryGetEntryHeader(entryId, out var header))
+                if (TryGetEntryHeader(entryId, out _, out _, out var header))
                 {
                     return ValueTask.FromResult(new LogEntryHeader { EntryId = header.EntryId, Term = header.Term, Length = header.ContentLength });
                 }
@@ -409,68 +588,100 @@ namespace Stormancer.Raft.WAL
                 }
             }
 
-            public bool TryAppendEntry(LogEntry logEntry)
+            public bool TryAppendEntry(LogEntry logEntry, ref int contentOffset, [NotNullWhen(false)] out ErrorId? error)
             {
                 var writer = _options.ReaderWriter;
-                var length =writer.GetContentLength(logEntry);
-                if (length > _options.PageSize)
-                {
-                    return false;
-                }
+                var totalLength = writer.GetContentLength(logEntry);
+
+                var remainingLength = totalLength - contentOffset;
 
                 lock (_syncRoot)
                 {
                     if (_readOnly)
                     {
+                        error = WalErrors.SegmentReadOnly;
                         return false;
                     }
-                   
-                    
 
-                    while (!_currentContentPage.CanAllocate(length))
+                    if(remainingLength > _options.PageSize)
                     {
-                        if (!this.TryCreateNewContentPage())
+                        error = WalErrors.ContentTooBig;
+                        return false;
+                    }
+                    if (!_currentContentPage.CanAllocate(remainingLength)) //If current page is full, create new page.
+                    {
+                        if (!TryCreateNewContentPage())
                         {
+                            error = WalErrors.SegmentFull;
                             return false;
                         }
-
                     }
+
 
                     while (!_currentIndexPage.CanAllocate(IndexRecord.Length))
                     {
                         if (!TryCreateNewIndexPage())
                         {
+                            error = WalErrors.SegmentFull;
                             return false;
                         }
 
                     }
+                    var length = remainingLength > _currentContentPage.Remaining ? _currentContentPage.Remaining : remainingLength;
                     var offset = _currentContentPage.Offset;
                     var pageId = _currentContentPage.Id;
                     var span = _currentContentPage.GetSpan(length);
 
-                    
-                    writer.TryWriteContent(ref span,logEntry, out _);
 
-                    
-                    _currentContentPage.Advance(length);
-                    var indexRecord = new IndexRecord { Term = logEntry.Term, EntryId = logEntry.Id, ContentLength = length, ContentOffset = offset, ContentPageId = pageId };
+                    if (!writer.TryWriteContent(ref span, logEntry, contentOffset, out var contentBytesWritten))
+                    {
+                        error = WalErrors.ContentWriteFailed;
+                        return false;
+                    }
+                    remainingLength -= contentBytesWritten;
+
+                    var indexRecord = new IndexRecord
+                    {
+                        Term = logEntry.Term,
+                        EntryId = logEntry.Id,
+                        ContentLength = length,
+                        ContentOffset = offset,
+                        ContentPageId = pageId,
+                        Flags = (remainingLength == 0 ? IndexRecordFlags.RecordEnd : IndexRecordFlags.None) | (contentOffset == 0 ? IndexRecordFlags.RecordStart : IndexRecordFlags.None)
+                    };
 
 
                     span = _currentIndexPage.GetSpan(IndexRecord.Length);
-                    indexRecord.TryWrite(span);
-                    _currentIndexPage.Advance(IndexRecord.Length);
+                    if (!indexRecord.TryWrite(span))
+                    {
+                        error = WalErrors.IndexWriteFailed;
+                        return false;
+                    }
 
-                    if(_firstRecord == null)
+                    _currentContentPage.Advance(length);
+                    _currentIndexPage.Advance(IndexRecord.Length);
+                    offset += length;
+
+                    if (_firstRecord == null)
                     {
                         _firstRecord = indexRecord;
                     }
                     _lastRecord = indexRecord;
+                    error = null;
+
+                    contentOffset += contentBytesWritten;
+
+                    if (contentOffset != totalLength)
+                    {
+                        error = WalErrors.ContentPartialWrite;
+                        return false;
+                    }
                     return true;
 
                 }
             }
 
-          
+
 
             public bool TryTruncateEnd(ulong newLastEntryId)
             {
@@ -487,25 +698,60 @@ namespace Stormancer.Raft.WAL
                         return true;
                     }
 
-                    if (newLastEntryId < _firstRecord.Value.EntryId)
+                    if (newLastEntryId < _firstRecord.Value.EntryId) //New last entry id is before start entry. Delete the segment.
                     {
                         _currentContentPage = _contentPages[0];
                         _currentIndexPage = _indexPages[0];
-                        
+
+                        for (int i = 1; i < _contentPages.Count; i++)
+                        {
+                            _contentPages[i].Dispose();
+                        }
+                        _contentPages.RemoveRange(1, _contentPages.Count - 1);
+
+                        for (int i = 1; i < _indexPages.Count; i++)
+                        {
+                            _indexPages[i].Dispose();
+                        }
+                        _indexPages.RemoveRange(1, _indexPages.Count - 1);
+
                         _firstRecord = null;
                         _lastRecord = null;
                         _readOnly = false;
                         return true;
                     }
 
-                    if (TryGetEntryHeader(newLastEntryId, out var header))
+                    if (TryGetEntryHeader(newLastEntryId, out int indexPageId, out int indexOffset, out var header))
                     {
+                        while (!header.Flags.HasFlag(IndexRecordFlags.RecordEnd))
+                        {
+                            if (TryGetEntryHeader(indexPageId, indexOffset + IndexRecord.Length, out var nextRecord))
+                            {
+                                if (nextRecord.EntryId != newLastEntryId)
+                                {
+                                    break;
+                                }
+                                else
+                                {
+                                    indexOffset = indexOffset + IndexRecord.Length;
+                                    header = nextRecord;
+                                }
+                            }
+                            else
+                            {
+                                indexPageId++;
+                                if (indexPageId >= _indexPages.Count)
+                                {
+                                    break;
+                                }
+                            }
+                        }
                         _lastRecord = header;
-                        this.TryGetIndexPosition(header.EntryId, out var pageId, out _);
 
-                        _currentIndexPage = _indexPages[pageId];
+
+                        _currentIndexPage = _indexPages[indexPageId];
                         _currentContentPage = _contentPages[header.ContentPageId];
-                            
+
 
                         _readOnly = false;
                         return true;
@@ -524,8 +770,9 @@ namespace Stormancer.Raft.WAL
             }
 
             public LogEntryHeader GetLastEntryHeader()
-            {;
-                return _lastRecord != null ? new LogEntryHeader { EntryId = _lastRecord.Value.EntryId, Term = _lastRecord.Value.Term, Length = _lastRecord.Value.ContentLength } :  LogEntryHeader.NotFound;
+            {
+
+                return _lastRecord != null ? new LogEntryHeader { EntryId = _lastRecord.Value.EntryId, Term = _lastRecord.Value.Term, Length = _lastRecord.Value.ContentLength } : LogEntryHeader.NotFound;
             }
 
             public void Delete()

@@ -9,6 +9,7 @@ namespace Stormancer.Raft
 {
     public class ReplicatedStorageShardConfiguration
     {
-        public MemoryPool<byte> MemoryPool { get; set; } = MemoryPool<byte>.Shared;
+        public MemoryPool<byte> MemoryPool { get; init; } = MemoryPool<byte>.Shared;
+        public required ILogEntryReaderWriter ReaderWriter { get; init; }
     }
 }

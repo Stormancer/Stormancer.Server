@@ -21,14 +21,14 @@ namespace Stormancer.Raft
         static abstract bool TryRead(ReadOnlySequence<byte> buffer,[NotNullWhen(true)] out T? record, out int length);
     }
 
-    public class IntegerTypeRecordLog<TRecord>(int typeId) : IIntegerRecordTypeLogEntryFactory where TRecord : IRecord<TRecord>
+    public class IntegerTypedRecordLog<TRecord>(int typeId) :IIntegerRecordTypeLogEntryFactory where TRecord : IRecord<TRecord>
     {
         public IEnumerable<(int Id, Type RecordType)> GetMetadata()
         {
             yield return (typeId,typeof(TRecord));
         }
 
-        public bool TryRead(ulong id, ulong term, int recordType, ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out LogEntry? entry, out int length)
+        public bool TryRead(ulong id, ulong term, int recordType, ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out IRecord? entry, out int length)
         {
             if(recordType != typeId)
             {
@@ -41,7 +41,7 @@ namespace Stormancer.Raft
             if (TRecord.TryRead(buffer, out var record, out length))
             {
                 
-                entry = new LogEntry(id, term, record);
+                entry = record;
                 return true;
             }
             else
@@ -51,7 +51,7 @@ namespace Stormancer.Raft
             }
         }
 
-        public bool TryRead(ulong id, ulong term, int recordType, ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out LogEntry? entry, out int length)
+        public bool TryRead(ulong id, ulong term, int recordType, ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out IRecord? entry, out int length)
         {
             if (recordType != typeId)
             {
@@ -63,8 +63,7 @@ namespace Stormancer.Raft
 
             if (TRecord.TryRead(ref buffer, out var record, out length))
             {
-
-                entry = new LogEntry(id, term, record);
+                entry = record;
                 return true;
             }
             else
@@ -74,11 +73,11 @@ namespace Stormancer.Raft
             }
         }
 
-        public bool TryWriteContent(ref Span<byte> buffer, LogEntry entry, out int length)
+        public bool TryWriteContent(ref Span<byte> buffer, IRecord record, out int length)
         {
-            if(entry.Record is TRecord)
+            if(record is TRecord)
             {
-                return entry.Record.TryWrite(ref buffer, out length);
+                return record.TryWrite(ref buffer, out length);
             }
             else
             {

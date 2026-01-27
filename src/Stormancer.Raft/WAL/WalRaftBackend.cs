@@ -105,7 +105,7 @@ namespace Stormancer.Raft.WAL
 
         public void ApplyEntries(ulong index)
         {
-            
+            throw new NotImplementedException();
         }
 
         public ValueTask<GetEntriesResult> GetEntries(ulong firstEntryId, ulong lastEntryId)

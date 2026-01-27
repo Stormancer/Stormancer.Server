@@ -9,7 +9,7 @@ using System.Threading.Tasks;
 
 namespace Stormancer.Raft.WAL
 {
-    public class LogMetadata<TContent> where TContent : IRecord<TContent>
+    public class WalMetadata<TContent> where TContent : IRecord<TContent>
     {
         private readonly object _lock = new object();
 
@@ -113,10 +113,10 @@ namespace Stormancer.Raft.WAL
 
             for (int i = Terms.Count - 1; i >= 0; i--)
             {
-                var termInfos = Terms[i];
-                if (termInfos.EntryId <= entryId)
+                var termInfo = Terms[i];
+                if (termInfo.EntryId <= entryId)
                 {
-                    term = termInfos.Term;
+                    term = termInfo.Term;
                     return true;
                 }
 
@@ -130,7 +130,7 @@ namespace Stormancer.Raft.WAL
         public TContent? Content { get; set; }
 
 
-        public static bool TryRead(ReadOnlySequence<byte> buffer, out LogMetadata<TContent>? metadata, out int length)
+        public static bool TryRead(ReadOnlySequence<byte> buffer, out WalMetadata<TContent>? metadata, out int length)
         {
             // | VERSION | SEGMENTSTARTS_LEN | TERMS_LEN | SEGMENTID_OFFSET | CONTENT_LEN |   SEGMENTSTARTS      |     TERMS    |   CONTENT   |
             // |    4    |        4          |     4     |        4         |      4      | 8*SEGMENT_STARTS_LEN | 16*TERMS_LEN | CONTENT_LEN |
@@ -155,7 +155,7 @@ namespace Stormancer.Raft.WAL
                 return false;
             }
 
-            metadata = new LogMetadata<TContent> { Version = version, SegmentIdOffset = segmentIdOffset };
+            metadata = new WalMetadata<TContent> { Version = version, SegmentIdOffset = segmentIdOffset };
 
             for (int i = 0; i < segmentStartsLength; i++)
             {

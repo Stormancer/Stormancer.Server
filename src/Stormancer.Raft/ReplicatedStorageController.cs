@@ -40,8 +40,7 @@ namespace Stormancer.Raft
     public interface IReplicatedStorageMessageChannel
     {
 
-        void AppendEntries<TLogEntry>(Guid origin, Guid destination, ulong term, IEnumerable<TLogEntry> entries, ulong lastLeaderEntryId, ulong prevLogIndex, ulong prevLogTerm, ulong leaderCommit);
-
+        
         Task<AppendEntriesResult> AppendEntriesAsync(Guid origin, Guid destination, ulong term, IEnumerable<LogEntry> entries, ulong lastLeaderEntryId, ulong prevLogIndex, ulong prevLogTerm, ulong leaderCommit);
 
         Task<RequestVoteResult> RequestVoteAsync(Guid candidateId, Guid destination, ulong term, ulong lastLogIndex, ulong lastLogTerm);

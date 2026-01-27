@@ -1,4 +1,5 @@
-﻿using System;
+﻿using Stormancer.Raft.WAL;
+using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -31,27 +32,28 @@ namespace Stormancer.Raft
 
 
     }
-    public interface ILogEntryReaderWriter
+    
+    public interface IRecordReaderWriter
     {
-        bool TryRead(ulong id, ulong term, ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out LogEntry? entry, out int length);
+        bool TryRead(ulong id, ulong term, ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out IRecord? entry);
 
-        bool TryRead(ulong id, ulong term, ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out LogEntry? entry, out int length);
         
-        bool TryWriteContent(ref Span<byte> buffer, LogEntry entry, out int length);
+        bool TryWriteContent(ref Span<byte> buffer, IRecord entry,int offset, out int bytesWritten);
 
-        int GetContentLength(LogEntry entry);
+        int GetContentLength(IRecord entry);
 
     }
 
    
-    public class IntegerRecordTypeLogEntryReaderWriter : ILogEntryReaderWriter
+    public class IntegerTypedRecordReaderWriter : IRecordReaderWriter
     {
         private readonly Dictionary<int, IIntegerRecordTypeLogEntryFactory> _idHandlers = new Dictionary<int, IIntegerRecordTypeLogEntryFactory>();
         private readonly Dictionary<Type, (IIntegerRecordTypeLogEntryFactory factory,int recordId)> _typeHandlers = new();
 
-        public IntegerRecordTypeLogEntryReaderWriter(IEnumerable<IIntegerRecordTypeLogEntryFactory> factories)
+        public IntegerTypedRecordReaderWriter(IEnumerable<IIntegerRecordTypeLogEntryFactory> factories)
         {
             Initialize(factories);
+
         }
 
         private void Initialize(IEnumerable<IIntegerRecordTypeLogEntryFactory> factories)
@@ -66,21 +68,21 @@ namespace Stormancer.Raft
             }
         }
 
-        public bool TryRead(ulong id, ulong term, ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out LogEntry? entry, out int length)
+        public bool TryRead(ulong id, ulong term, ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out IRecord? entry)
         {
+         
             if(buffer.Length < 8)
             {
                 entry = null;
-                length = 8;
                 return false;
             }
 
             Span<byte> b = stackalloc byte[4];
-            buffer.CopyTo(b);
+            buffer.Slice(0,4).CopyTo(b);
             BinaryPrimitives.TryReadInt32BigEndian(b, out var recordTypeId);
             buffer.Slice(4, 4).CopyTo(b);
             BinaryPrimitives.TryReadInt32BigEndian(b, out var contentLength);
-            length = contentLength + 8;
+           
             if (_idHandlers.TryGetValue(recordTypeId, out var handler))
             {
                 return handler.TryRead(id, term, recordTypeId, buffer.Slice(8), out entry, out _);
@@ -93,46 +95,18 @@ namespace Stormancer.Raft
             }   
         }
 
-        public bool TryRead(ulong id, ulong term, ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out LogEntry? entry, out int length)
+
+        public bool TryWriteContent(ref Span<byte> buffer, IRecord record,int offset, out int length)
         {
-            if (buffer.Length < 8)
-            {
-                entry = null;
-                length = 8;
-                return false;
-            }
-
-            Span<byte> b = stackalloc byte[4];
-            buffer.CopyTo(b);
-            BinaryPrimitives.TryReadInt32BigEndian(b, out var recordTypeId);
-            buffer.Slice(4, 4).CopyTo(b);
-            BinaryPrimitives.TryReadInt32BigEndian(b, out var contentLength);
-            length = contentLength + 8;
-            if (_idHandlers.TryGetValue(recordTypeId, out var handler))
-            {
-                var contentBuffer = buffer.Slice(8);
-                return handler.TryRead(id, term, recordTypeId,ref contentBuffer , out entry, out _);
-
-            }
-            else
-            {
-                entry = null;
-                return false;
-            }
-        }
-
-
-        public bool TryWriteContent(ref Span<byte> buffer, LogEntry entry, out int length)
-        {
-            if(_typeHandlers.TryGetValue(entry.Record.GetType(),out var tuple))
+            if(_typeHandlers.TryGetValue(record.GetType(),out var tuple))
             {
                 var (factory, recordType) = tuple;
                 BinaryPrimitives.TryWriteInt32BigEndian(buffer, recordType);
-                length = GetContentLength(entry);
+                length = GetContentLength(record);
                 BinaryPrimitives.TryWriteInt32BigEndian(buffer.Slice(4),length);
 
                 var contentSpan = buffer.Slice(8);
-                return factory.TryWriteContent(ref contentSpan, entry, out _);
+                return factory.TryWriteContent(ref contentSpan, record, out _);
             }
             else
             {
@@ -142,9 +116,9 @@ namespace Stormancer.Raft
             }
         }
 
-        public int GetContentLength(LogEntry entry)
+        public int GetContentLength(IRecord entry)
         {
-            return entry.Record.GetLength() + 8;
+            return entry.GetLength() + 8;
         }
 
        
@@ -154,11 +128,11 @@ namespace Stormancer.Raft
     {
         public IEnumerable<(int Id, Type RecordType)> GetMetadata();
 
-        public bool TryRead(ulong id, ulong term, int recordType, ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out LogEntry? entry, out int length);
+        public bool TryRead(ulong id, ulong term, int recordType, ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out IRecord? entry, out int length);
 
-        public bool TryRead(ulong id, ulong term, int recordType, ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out LogEntry? entry, out int length);
+        public bool TryRead(ulong id, ulong term, int recordType, ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out IRecord? entry, out int length);
 
-        public bool TryWriteContent(ref Span<byte> buffer, LogEntry entry, out int length);
+        public bool TryWriteContent(ref Span<byte> buffer, IRecord entry, out int length);
 
 
     }
