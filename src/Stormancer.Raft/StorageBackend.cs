@@ -8,8 +8,7 @@ namespace Stormancer.Raft
 {
     
 
-    public interface IStorageShardBackend<TCommandResult>
-       where TCommandResult : ICommandResult<TCommandResult>
+    public interface IStorageShardBackend
     {
         ulong LastAppliedLogEntry { get; }
 
@@ -20,9 +19,9 @@ namespace Stormancer.Raft
 
 
 
-        bool TryAppendCommand(RaftCommand command, [NotNullWhen(true)] out LogEntry? entry, [NotNullWhen(false)] out Error? error);
+        ValueTask<RaftCommandResult> TryAppendCommand(RaftCommand command);
         
-        bool TryAppendEntries(IEnumerable<LogEntry> entries);
+        bool TryAppendEntries(IEnumerable<LogEntry> entries,[NotNullWhen(false)] out Error? error);
 
         void ApplyEntries(ulong index);
 
@@ -31,7 +30,7 @@ namespace Stormancer.Raft
         bool TryTruncateEntriesAfter(ulong logEntryId);
 
         bool TryGetEntryTerm(ulong prevLogId, out ulong entryTerm);
-        ValueTask<TCommandResult> WaitCommittedAsync(ulong entryId);
+
         void UpdateTerm(ulong term);
 
 

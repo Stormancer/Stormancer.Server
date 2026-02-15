@@ -3,38 +3,16 @@ using Microsoft.Extensions.ObjectPool;
 using Stormancer.Raft;
 using Stormancer.Threading;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace Stormancer.Raft
 {
 
-    internal class NoOpSystemRecord : IRecord<NoOpSystemRecord>
-    {
-        private NoOpSystemRecord() { }
-        public static NoOpSystemRecord Instance { get; } = new NoOpSystemRecord();
-
-        public static bool TryRead(ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out NoOpSystemRecord? record, out int length)
-        {
-            throw new NotImplementedException();
-        }
-
-        public static bool TryRead(ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out NoOpSystemRecord? record, out int length)
-        {
-            throw new NotImplementedException();
-        }
-
-        public int GetLength()
-        {
-            throw new NotImplementedException();
-        }
-
-        public bool TryWrite(ref Span<byte> buffer, out int length)
-        {
-            throw new NotImplementedException();
-        }
-    }
+  
     public class RaftCommand
     {
         public Guid Id { get; } = Guid.NewGuid();
@@ -56,28 +34,136 @@ namespace Stormancer.Raft
         {
             return Record as TSystemCommandContent;
         }
-    }
-    public interface ICommand<T> where T : ICommand<T>
-    {
-        Guid Id { get; }
-        TSystemCommandContent? As<TSystemCommandContent>() where TSystemCommandContent : class, IRecord<TSystemCommandContent>;
-        static abstract T Create(IRecord systemRecord);
+
+        public int GetLength(IRecordReaderWriter readerWriter)
+        {
+            return 16 + readerWriter.GetContentLength(Record);
+        }
+
+        public bool TryWrite(Span<byte> buffer, out int bytesWritten, IRecordReaderWriter readerWriter)
+        {
+            var written = 0;
+            var result = Id.TryWriteBytes(buffer) && readerWriter.TryWriteContent(buffer.Slice(16), Record, out written);
+            if (result)
+            {
+                bytesWritten = written + 16;
+                return result;
+            }
+            else
+            {
+                bytesWritten = 0;
+                return false;
+            }
+        }
+
+
     }
 
-    public interface ICommandResult<T> where T : ICommandResult<T>
+
+    public class RaftCommandResult
     {
-        Guid OperationId { get; }
+        public Guid OperationId { get; init; }
 
         [MemberNotNullWhen(false, "Error")]
-        bool Success { get; }
+        public bool Success => Error == null;
 
-        Error? Error { get; }
+        public Error? Error { get; init; }
 
-        int GetLength();
-        void Write(Span<byte> span);
-        static abstract bool TryRead(ReadOnlySequence<byte> buffer, out int bytesRead, [NotNullWhen(true)] out T? result);
+        public ulong LogEntryId { get; init; }
+        public ulong Term { get; init; }
 
-        static abstract T CreateFailed(Guid operationId, Error error);
+        public int GetLength()
+        {
+            return 16 + 8 + 8 + 1 + (Success ? 0 : Error.GetLength());
+        }
+
+        public bool TryWrite(Span<byte> span, out int bytesWritten)
+        {
+            if (span.Length < 33)
+            {
+                bytesWritten = 0;
+                return false;
+            }
+            var result = OperationId.TryWriteBytes(span) &&
+                BinaryPrimitives.TryWriteUInt64BigEndian(span.Slice(16), Term) &&
+                BinaryPrimitives.TryWriteUInt64BigEndian(span.Slice(24), LogEntryId);
+
+            if (!result)
+            {
+                bytesWritten = 0;
+                return false;
+            }
+            span[32] = Success ? (byte)1 : (byte)0;
+            if (Success)
+            {
+                bytesWritten = 33;
+                return true;
+            }
+            else
+            {
+                if (Error.TryWrite(span.Slice(33), out var written))
+                {
+                    bytesWritten = 33 + written;
+                    return true;
+                }
+                else
+                {
+                    bytesWritten = 0;
+                    return false;
+                }
+            }
+        }
+
+        public static bool TryRead(ReadOnlySequence<byte> buffer, out int bytesRead, [NotNullWhen(true)] out RaftCommandResult? cmdResult)
+        {
+            var reader = new SequenceReader<byte>(buffer);
+
+            Span<byte> b = stackalloc byte[33];
+
+            var result = reader.TryCopyTo(b);
+
+            if (!result)
+            {
+                bytesRead = (int)buffer.Length;
+                cmdResult = null;
+                return false;
+            }
+
+            bool success = b[32] != 0;
+
+
+            var term = BinaryPrimitives.ReadUInt64BigEndian(b.Slice(16));
+            var entryId = BinaryPrimitives.ReadUInt64BigEndian(b.Slice(24));
+            if (success)
+            {
+                if (Error.TryRead(buffer.Slice(33), out var error, out var read))
+                {
+                    bytesRead = read + 33;
+                    cmdResult = new RaftCommandResult { OperationId = new Guid(b.Slice(0, 16)), Error = error, Term = term, LogEntryId = entryId };
+                    return true;
+                }
+                else
+                {
+                    bytesRead = read+33;
+                    cmdResult = null;
+                    return false;
+                }
+            }
+            else
+            {
+                bytesRead = 33;
+                cmdResult = new RaftCommandResult { OperationId = new Guid(b.Slice(0, 16)), Error = null, Term = term, LogEntryId = entryId };
+                return true;
+            }
+
+
+        }
+
+
+        internal static RaftCommandResult CreateFailed(Guid id, Error error)
+        {
+            return new RaftCommandResult { Error = error, OperationId = id };
+        }
     }
 
 
@@ -89,9 +175,7 @@ namespace Stormancer.Raft
 
 
 
-    public class ReplicatedStorageShard<TCommandResult> : IReplicatedStorageMessageHandler
-    where TCommandResult : ICommandResult<TCommandResult>
-
+    public class ReplicatedStorageShard : IReplicatedStorageMessageHandler
     {
         private class ShardReplicaSynchronisationState(Guid shardUid, ulong nextLogEntryIdToSend)
         {
@@ -118,7 +202,7 @@ namespace Stormancer.Raft
         private Guid? _votedFor = null;
 
         private readonly IReplicatedStorageMessageChannel? _channel;
-        private readonly IStorageShardBackend<TCommandResult> _backend;
+        private readonly IStorageShardBackend _backend;
 
         private readonly ReplicatedStorageShardConfiguration _config;
 
@@ -133,7 +217,7 @@ namespace Stormancer.Raft
             ReplicatedStorageShardConfiguration config,
             ILoggerFactory logger,
             IReplicatedStorageMessageChannel? channel,
-            IStorageShardBackend<TCommandResult> backend
+            IStorageShardBackend backend
             )
         {
             ArgumentNullException.ThrowIfNull(config, nameof(config));
@@ -148,28 +232,25 @@ namespace Stormancer.Raft
 
 
 
-        public ValueTask<TCommandResult> ExecuteCommand(RaftCommand command)
+        public ValueTask<RaftCommandResult> ExecuteCommand(RaftCommand command,bool allowForwardToLeader = true)
         {
             ShardsReplicationLogging.LogStartProcessingCommand(_logger, command.Id);
 
             if (IsLeader)
             {
-
-                if (_backend.TryAppendCommand(command, out var entry, out var error))
+                var task = _backend.TryAppendCommand(command);
+                if (!task.IsCompleted)
                 {
-                    var task = _backend.WaitCommittedAsync(entry.Id);
+                   
                     if (!AppendEntriesToReplica(false))
                     {
                         //no replica, we should commit immediately.
                         TryCommit();
                     }
-                    return task;
+                    
 
                 }
-                else
-                {
-                    return ValueTask.FromResult(TCommandResult.CreateFailed(command.Id, error));
-                }
+                return task;
             }
             else
             {
@@ -179,36 +260,10 @@ namespace Stormancer.Raft
 
         }
 
-        private ValueTask<TCommandResult> ExecuteNoOp()
+        private ValueTask<RaftCommandResult> ExecuteNoOp()
         {
 
-
-            if (IsLeader)
-            {
-
-                if (_backend.TryAppendCommand(TCommand.Create(NoOpSystemRecord.Instance), out var entry, out var error))
-                {
-                    var task = _backend.WaitCommittedAsync(entry.Id);
-                    if (!AppendEntriesToReplica(false))
-                    {
-                        //no replica, we should commit immediately.
-                        TryCommit();
-                    }
-                    return task;
-
-                }
-                else
-                {
-                    return ValueTask.FromResult(TCommandResult.CreateFailed(Guid.NewGuid(), error));
-                }
-            }
-            else
-            {
-                return ValueTask.FromResult(TCommandResult.CreateFailed(Guid.NewGuid(), new Error(ShardErrors.NotLeader, null)));
-            }
-
-
-
+            return ExecuteCommand(RaftCommand.Create(NoOpRecord.Instance),false);
         }
 
         public async ValueTask UpdateClusterConfiguration(IEnumerable<Server> newConfiguration)
@@ -224,43 +279,34 @@ namespace Stormancer.Raft
             }
 
 
-            await UpdateClusterConfiguration(new ShardsConfigurationRecord(_backend.CurrentShardsConfiguration.New, new HashSet<Server>(newConfiguration)));
+            var result = await UpdateClusterConfiguration(new ShardsConfigurationRecord(_backend.CurrentShardsConfiguration.New, [.. newConfiguration]));
+            if(!result.Success)
+            {
+                throw new InvalidOperationException($"Failed to update cluster configuration : {result.Error}");
+            }
+            result = await UpdateClusterConfiguration(new ShardsConfigurationRecord(null, [.. newConfiguration]));
 
-            await UpdateClusterConfiguration(new ShardsConfigurationRecord(null, new HashSet<Server>(newConfiguration)));
+            if(!result.Success)
+            {
+                throw new InvalidOperationException($"Failed to update cluster configuration : {result.Error}");
+            }
+
             if (!IsShardVoting(ShardUid))
             {
                 StepDownLeadership();
             }
         }
 
-        private async ValueTask UpdateClusterConfiguration(ShardsConfigurationRecord record)
+        private ValueTask<RaftCommandResult> UpdateClusterConfiguration(ShardsConfigurationRecord record)
         {
-            ValueTask<TCommandResult> task;
-            lock (_syncRoot)
-            {
-
-                if (_backend.TryAppendCommand(TCommand.Create(record), out var entry, out var error))
-                {
-                    task = _backend.WaitCommittedAsync(entry.Id);
-                    if (!AppendEntriesToReplica(false))
-                    {
-                        //no replica, we should commit immediately.
-                        TryCommit();
-                    }
-                }
-                else
-                {
-                    throw new InvalidOperationException($"Failed to apply the configuration change because : {error}");
-                }
-            }
-
-            await task;
+            return ExecuteCommand(RaftCommand.Create(record), false);
+           
         }
 
-        private Dictionary<Guid, AsyncOperation<TCommandResult>> _forwardedCommands = new Dictionary<Guid, AsyncOperation<TCommandResult>>();
+        private Dictionary<Guid, AsyncOperation<RaftCommandResult>> _forwardedCommands = new Dictionary<Guid, AsyncOperation<RaftCommandResult>>();
 
-        private ObjectPool<AsyncOperation<TCommandResult>> _operationPool = new DefaultObjectPool<AsyncOperation<TCommandResult>>(new AsyncOperationPoolPolicy<TCommandResult>());
-        private ValueTask<TCommandResult> ForwardCommand(RaftCommand command)
+        private ObjectPool<AsyncOperation<RaftCommandResult>> _operationPool = new DefaultObjectPool<AsyncOperation<RaftCommandResult>>(new AsyncOperationPoolPolicy<RaftCommandResult>());
+        private ValueTask<RaftCommandResult> ForwardCommand(RaftCommand command)
         {
             if (IsLeader)
             {
@@ -268,7 +314,7 @@ namespace Stormancer.Raft
             }
             else if (LeaderUid == null)
             {
-                return ValueTask.FromResult(TCommandResult.CreateFailed(command.Id, new Error(RaftErrors.NotAvailable, null)));
+                return ValueTask.FromResult(RaftCommandResult.CreateFailed(command.Id, new Error(RaftErrors.NotAvailable, null)));
             }
             else if (_channel != null)
             {
@@ -276,11 +322,11 @@ namespace Stormancer.Raft
             }
             else
             {
-                return ValueTask.FromResult(TCommandResult.CreateFailed(command.Id, new Error(RaftErrors.NotAvailable, "communication channel unavailable.")));
+                return ValueTask.FromResult(RaftCommandResult.CreateFailed(command.Id, new Error(RaftErrors.NotAvailable, "communication channel unavailable.")));
             }
         }
 
-        private ValueTask<TCommandResult> ForwardCommandImpl(RaftCommand command)
+        private ValueTask<RaftCommandResult> ForwardCommandImpl(RaftCommand command)
         {
             var id = command.Id;
             Debug.Assert(LeaderUid != null && _channel != null);
@@ -291,26 +337,27 @@ namespace Stormancer.Raft
                 _forwardedCommands.Add(id, op);
 
             }
-           
-            var length = _config.ReaderWriter.GetContentLength(command.Record);
+
+            var length = command.GetLength(_config.ReaderWriter);
 
 
             if (length < 128)
             {
                 Span<byte> buffer = stackalloc byte[length];
-                command.Write(buffer);
+                command.TryWrite(buffer, out _, _config.ReaderWriter);
+
                 ReadOnlySpan<byte> span = buffer;
                 _channel.ForwardOperationToPrimary(ShardUid, LeaderUid.Value, ref span);
             }
             else
             {
                 using var owner = _config.MemoryPool.Rent(length);
-                command.Write(owner.Memory.Span);
+                command.TryWrite(owner.Memory.Span, out length, _config.ReaderWriter);
                 ReadOnlySpan<byte> span = owner.Memory.Span.Slice(0, length);
                 _channel.ForwardOperationToPrimary(ShardUid, LeaderUid.Value, ref span);
             }
 
-            async ValueTask<TCommandResult> ProcessTaskCompletion(Guid id, AsyncOperation<TCommandResult> asyncOperation)
+            async ValueTask<RaftCommandResult> ProcessTaskCompletion(Guid id, AsyncOperation<RaftCommandResult> asyncOperation)
             {
                 try
                 {
@@ -321,9 +368,10 @@ namespace Stormancer.Raft
                     _forwardedCommands.Remove(id);
                     _operationPool.Return(asyncOperation);
                 }
-            };
+            }
+            ;
 
-            return ProcessTaskCompletion(id,op);
+            return ProcessTaskCompletion(id, op);
 
         }
 
@@ -359,7 +407,14 @@ namespace Stormancer.Raft
 
         public bool IsShardVoting(Guid shardUid)
         {
-            return IsShardConnected(shardUid) && _backend.CurrentShardsConfiguration.IsVoting(shardUid);
+            if (ShardUid == shardUid && _channel == null)
+            {
+                return true;
+            }
+            else
+            {
+                return IsShardConnected(shardUid) && _backend.CurrentShardsConfiguration.IsVoting(shardUid);
+            }
         }
 
 
@@ -591,7 +646,7 @@ namespace Stormancer.Raft
 
 
 
-            if (!_backend.TryAppendEntries(entries))
+            if (!_backend.TryAppendEntries(entries, out var _))
             {
                 return CreateAppendEntriesResult(leaderId, false);
             }
@@ -759,7 +814,7 @@ namespace Stormancer.Raft
 
         public void ProcessForwardOperationResponse(Guid originUid, ReadOnlySequence<byte> responseInput, out int bytesRead)
         {
-            if (TCommandResult.TryRead(responseInput, out bytesRead, out var result) && _forwardedCommands.TryGetValue(result.OperationId, out var asyncOperation))
+            if (RaftCommandResult.TryRead(responseInput, out bytesRead, out var result) && _forwardedCommands.TryGetValue(result.OperationId, out var asyncOperation))
             {
                 asyncOperation.TrySetResult(result);
 
@@ -768,8 +823,8 @@ namespace Stormancer.Raft
 
         private bool TrySetAsLeader()
         {
-            
-            if (_channel !=null &&  !_backend.CurrentShardsConfiguration.IsVoting(ShardUid))
+
+            if (_channel != null && !_backend.CurrentShardsConfiguration.IsVoting(ShardUid))
             {
                 return false;
             }
@@ -778,7 +833,7 @@ namespace Stormancer.Raft
             LeaderUid = ShardUid;
 
             //Send an append entry command on election to trigger lease.
-            _ = ExecuteNoOp();
+           
             return true;
         }
 
@@ -813,15 +868,24 @@ namespace Stormancer.Raft
             }
             if (_channel == null)
             {
-
-                return ValueTask.FromResult(TrySetAsLeader());
+                if (TrySetAsLeader())
+                {
+                    var result = ExecuteNoOp();
+                    Debug.Assert(result.IsCompletedSuccessfully);
+                    return ValueTask.FromResult(true);
+                }
+                else
+                {
+                    return ValueTask.FromResult(false);
+                }
+               
             }
 
             if (!IsShardVoting(ShardUid))
             {
                 return ValueTask.FromResult(false);
             }
-            
+
 
             if (_electAsLeaderOperation != null)
             {
@@ -854,6 +918,7 @@ namespace Stormancer.Raft
 
 
                 var results = await Task.WhenAll(tasks);
+                bool elected = false;
                 lock (_syncRoot)
                 {
                     if (LeaderUid == null)
@@ -876,7 +941,8 @@ namespace Stormancer.Raft
                         if (votes >= majority)
                         {
 
-                            operation.TrySetResult(TrySetAsLeader());
+                            elected = TrySetAsLeader();
+                            
                         }
                         else
                         {
@@ -884,7 +950,15 @@ namespace Stormancer.Raft
                         }
 
                     }
+
+                   
                     _electAsLeaderOperation = null;
+                }
+
+                if (elected)
+                {
+                    var r = await ExecuteNoOp();
+                    operation.TrySetResult(r.Success);
                 }
             }
 

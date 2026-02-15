@@ -225,18 +225,19 @@ namespace Stormancer.Raft.WAL
 
 
         }
-        public bool TryAppendEntry(LogEntry entry, out ErrorId? error)
+
+        public bool TryAppendEntry(LogEntry entry, [NotNullWhen(false)] out Error? error)
         {
             var segment = GetCurrentSegment();
             int offset = 0;
 
             while (!TryAppendEntry(segment, entry, ref offset, out error))
             {
-                if (error == WalErrors.SegmentFull)
+                if (error == new Error(WalErrors.SegmentFull,null))
                 {
                     segment = CreateNewSegmentIfRequired(segment);
                 }
-                else if (error == WalErrors.ContentPartialWrite)
+                else if (error == new Error(WalErrors.ContentPartialWrite,null))
                 {
                     //Keep writing.
                 }
@@ -247,26 +248,27 @@ namespace Stormancer.Raft.WAL
             }
             return true;
         }
-        public bool TryAppendEntries(IEnumerable<LogEntry> logEntries, out AppendEntryError? error)
+
+        public bool TryAppendEntries(IEnumerable<LogEntry> logEntries,[NotNullWhen(false)] out AppendEntryError? error)
         {
             var segment = GetCurrentSegment();
             foreach (var entry in logEntries)
             {
                 int offset = 0;
-                ErrorId? e;
+                Error? e;
                 while (!TryAppendEntry(segment, entry, ref offset, out e))
                 {
-                    if (e == WalErrors.SegmentFull)
+                    if (e.Id == WalErrors.SegmentFull)
                     {
                         segment = CreateNewSegmentIfRequired(segment);
                     }
-                    else if (e == WalErrors.ContentPartialWrite)
+                    else if (e.Id == WalErrors.ContentPartialWrite)
                     {
                         //Keep writing.
                     }
                     else
                     {
-                        error = new AppendEntryError(e, entry);
+                        error = new AppendEntryError(e.Id, entry);
                         return false;
                     }
                 }
@@ -277,12 +279,12 @@ namespace Stormancer.Raft.WAL
 
 
 
-        private bool TryAppendEntry(IWALSegment segment, LogEntry entry, ref int offset, [NotNullWhen(false)] out ErrorId? error)
+        private bool TryAppendEntry(IWALSegment segment, LogEntry entry, ref int offset, [NotNullWhen(false)] out Error? error)
         {
 
             if(segment.GetLastEntryHeader().EntryId != entry.Id -1)
             {
-                error = WalErrors.NonConsecutiveEntryId;
+                error = new Error(WalErrors.NonConsecutiveEntryId,null);
                 return false;
             }
             if (segment.TryAppendEntry(entry, ref offset, out error))
@@ -439,7 +441,7 @@ namespace Stormancer.Raft.WAL
         /// <param name="offset"></param>
         /// <param name="error"></param>
         /// <returns></returns>
-        bool TryAppendEntry(LogEntry logEntry, ref int offset, [NotNullWhen(false)] out ErrorId? error);
+        bool TryAppendEntry(LogEntry logEntry, ref int offset, [NotNullWhen(false)] out Error? error);
 
         ValueTask<LogEntryHeader> GetEntryHeader(ulong firstEntry);
 
@@ -448,7 +450,6 @@ namespace Stormancer.Raft.WAL
         LogEntryHeader GetLastEntryHeader();
         void Delete();
 
-        bool IsEmpty { get; }
     }
 
     public struct LogEntryHeader

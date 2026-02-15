@@ -28,7 +28,7 @@ namespace Stormancer.Raft
             yield return (typeId,typeof(TRecord));
         }
 
-        public bool TryRead(ulong id, ulong term, int recordType, ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out IRecord? entry, out int length)
+        public bool TryRead(int recordType, ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out IRecord? entry, out int length)
         {
             if(recordType != typeId)
             {
@@ -51,7 +51,7 @@ namespace Stormancer.Raft
             }
         }
 
-        public bool TryRead(ulong id, ulong term, int recordType, ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out IRecord? entry, out int length)
+        public bool TryRead(int recordType, ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out IRecord? entry, out int length)
         {
             if (recordType != typeId)
             {

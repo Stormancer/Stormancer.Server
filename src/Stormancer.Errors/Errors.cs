@@ -54,7 +54,44 @@ namespace Stormancer
 
         public string? Details { get; }
 
+        public int GetLength()
+        {
+            return 4;
+        }
 
+        public static bool TryRead(ReadOnlySequence<byte> buffer, out Error? error, out int readBytes)
+        {
+            var reader = new SequenceReader<byte>(buffer);
+            if (reader.TryReadBigEndian(out int code) && Errors.TryGet(code, out var errorId))
+            {
+                error = new Error(errorId, null);
+                readBytes = 4;
+                return true;
+            }
+            else
+            {
+                error = null;
+                readBytes = (int)buffer.Length < 4 ? (int)buffer.Length : 4;
+                return false;
+            }
+
+        }
+
+        public bool TryWrite(Span<byte> buffer, out int writtenBytes)
+        {
+            if (BinaryPrimitives.TryWriteInt32BigEndian(buffer, this.Id.Code))
+            {
+                writtenBytes = 4;
+                return true;
+            }
+            else
+            {
+                writtenBytes = (int)buffer.Length;
+                return false;
+            }
+        }
+
+        public override string ToString() => $"{Id.Id}({Id.Code}) ({Details})";
     }
 
     public class Errors
@@ -62,7 +99,7 @@ namespace Stormancer
 
         private static Dictionary<int, ErrorId> _errors = new();
 
-        
+
         /// <summary>
         /// The error id is not registered.
         /// </summary>

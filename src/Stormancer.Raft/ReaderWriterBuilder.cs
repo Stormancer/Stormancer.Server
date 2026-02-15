@@ -9,9 +9,9 @@ namespace Stormancer.Raft
 {
     public class ReaderWriterBuilder
     {
-        public ILogEntryReaderWriter Create()
+        public IRecordReaderWriter Create()
         {
-            return  new IntegerRecordTypeLogEntryReaderWriter(_factories);
+            return  new IntegerTypedRecordReaderWriter(_factories);
         }
 
         public ReaderWriterBuilder AddRecordType<T>() where T : IRecord<T>

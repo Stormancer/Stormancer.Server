@@ -5,6 +5,7 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Text;
@@ -73,19 +74,17 @@ namespace Stormancer.Raft.WAL
         public ulong CurrentTerm { get; set; }
     }
 
-    public class WalShardBackend<TCommand, TCommandResult> : IStorageShardBackend<TCommand, TCommandResult>
-        where TCommand : ICommand<TCommand>
-        where TCommandResult : ICommandResult<TCommandResult>
-       
+    public class WalShardBackend : IStorageShardBackend   
     {
+      
+        private readonly WriteAheadLog<RaftMetadata> _log;
+        private readonly RaftMetadata _metadata;
+        private readonly object _pendingOperationLock = new object();
+        private AsyncOperationWithData<(Guid, ulong), RaftCommandResult>? _firstPendingOperation;
+        private AsyncOperationWithData<(Guid, ulong), RaftCommandResult>? _lastPendingOperation;
+        private static readonly DefaultObjectPool<AsyncOperationWithData<(Guid,ulong), RaftCommandResult>> _defaultObjectPool = new (new AsyncOperationWithDataPoolPolicy<(Guid, ulong), RaftCommandResult>());
         
-        private WriteAheadLog<RaftMetadata> _log;
-        private RaftMetadata _metadata;
-
-        private Dictionary<ulong, AsyncOperationWithData<Guid, TCommandResult>> _pendingOperations = new();
-        private ObjectPool<AsyncOperationWithData<Guid, TCommandResult>> _operationPool = new DefaultObjectPool<AsyncOperationWithData<Guid, TCommandResult>>(new AsyncOperationWithDataPoolPolicy<Guid, TCommandResult>());
-
-        private object _syncRoot = new object();
+        private readonly object _syncRoot = new object();
 
         public WalShardBackend(IWALStorageProvider segmentProvider)
         {
@@ -103,26 +102,67 @@ namespace Stormancer.Raft.WAL
 
         public ShardsConfigurationRecord CurrentShardsConfiguration { get; private set; } = new ShardsConfigurationRecord(null, null);
 
-        public void ApplyEntries(ulong index)
-        {
-            throw new NotImplementedException();
-        }
+       
 
         public ValueTask<GetEntriesResult> GetEntries(ulong firstEntryId, ulong lastEntryId)
         {
             return _log.GetEntriesAsync(firstEntryId, lastEntryId);
         }
 
-        public bool TryAppendCommand(TCommand command, [NotNullWhen(true)] out LogEntry? entry, [NotNullWhen(false)] out Error? error)
+        public ValueTask<RaftCommandResult> TryAppendCommand(RaftCommand command)
         {
-            throw new NotImplementedException();
+            var header = _log.GetLastEntryHeader();
+            var e = new LogEntry(header.EntryId + 1, _metadata.CurrentTerm, command.Record);
+            
+            if (_log.TryAppendEntry(e, out var error))
+            {
+               
+                
+                
+                return AddOperation(command.Id, e.Id);
+            }
+            else
+            {
+                return ValueTask.FromResult(new RaftCommandResult { Error = error });
+            }
         }
+        private ValueTask<RaftCommandResult> AddOperation(Guid operationId, ulong logEntryId)
+        {
+            var asyncOp = _defaultObjectPool.Get();
+            asyncOp.TryOwnAndReset();
+            asyncOp.Item = (operationId, logEntryId);
 
+            lock (_pendingOperationLock)
+            {
+                if (_lastPendingOperation != null)
+                {
+                    _lastPendingOperation.Next = asyncOp;
+                    _lastPendingOperation = asyncOp;
+                }
+                else
+                {
+                    _firstPendingOperation = asyncOp;
+                    _lastPendingOperation = asyncOp;
+                }
+            }
+
+            return asyncOp.ValueTaskOfT; 
+        }
        
 
-        public bool TryAppendEntries(IEnumerable<LogEntry> entries)
+        public bool TryAppendEntries(IEnumerable<LogEntry> entries,[NotNullWhen(false)] out Error? error)
         {
-            throw new NotImplementedException();
+           
+            if (_log.TryAppendEntries(entries, out var e))
+            {
+                error = null;
+                return true;
+            }
+            else
+            {
+                error = new Error(e.Error, null);
+                return false;
+            }
         }
 
      
@@ -137,7 +177,10 @@ namespace Stormancer.Raft.WAL
             {
                 return false;
             }
+
             _log.TruncateAfter(logEntryId);
+
+           
             return true;
         }
 
@@ -150,19 +193,38 @@ namespace Stormancer.Raft.WAL
             }
 
         }
+        public void ApplyEntries(ulong index)
+        {
+            if (index > _metadata.LastAppliedLogEntry)
+            {
+                _metadata.LastAppliedLogEntry = index;
+                _log.UpdateMetadata(_metadata);
 
-        public ValueTask<TCommandResult> WaitCommittedAsync(ulong entryId)
+            }
+        }
+        public ValueTask<RaftCommandResult> WaitCommittedAsync(ulong entryId)
         {
             lock (_syncRoot)
             {
                 if (_pendingOperations.TryGetValue(entryId, out var operation))
                 {
-                    return operation.ValueTaskOfT;
+                    if(operation.IsCompleted)
+                    {
+                        _pendingOperations.Remove(entryId);
+                        var r = operation.ValueTaskOfT.Result;
+                        _defaultObjectPool.Return(operation);
+                        return ValueTask.FromResult(r);
+                    }
+                    else
+                    {
+                        return operation.ValueTaskOfT;
+                    }
+                 
 
                 }
                 else
                 {
-                    return ValueTask.FromException<TCommandResult>(new InvalidOperationException($"No pending operation for {entryId}"));
+                    return ValueTask.FromException<RaftCommandResult>(new InvalidOperationException($"No pending operation in progress for {entryId}"));
                 }
             }
         }

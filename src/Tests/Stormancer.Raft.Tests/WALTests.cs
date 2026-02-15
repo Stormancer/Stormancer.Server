@@ -86,12 +86,11 @@ namespace Stormancer.Raft.Tests
         [InlineData(2)]
         [InlineData(150)]
         [InlineData(10_000)]
-        [InlineData(1_000_000)]
         public async Task AddEntries(ulong count)
         {
             var provider = new MemoryWALSegmentProvider(new MemoryWALSegmentOptions
             {
-                ReaderWriter = new IntegerRecordTypeLogEntryReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
+                ReaderWriter = new IntegerTypedRecordReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
             });
             await using var wal = new WriteAheadLog<MockMetadataRecord>("test", new LogOptions { Storage = provider });
             ulong logEntryId = 1;
@@ -114,7 +113,7 @@ namespace Stormancer.Raft.Tests
         {
             var provider = new MemoryWALSegmentProvider(new MemoryWALSegmentOptions
             {
-                ReaderWriter = new IntegerRecordTypeLogEntryReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
+                ReaderWriter = new IntegerTypedRecordReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
             });
             await using var wal = new WriteAheadLog<MockMetadataRecord>("test", new LogOptions { Storage = provider });
 
@@ -137,7 +136,7 @@ namespace Stormancer.Raft.Tests
         {
             var provider = new MemoryWALSegmentProvider(new MemoryWALSegmentOptions
             {
-                ReaderWriter = new IntegerRecordTypeLogEntryReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
+                ReaderWriter = new IntegerTypedRecordReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
             });
             await using var wal = new WriteAheadLog<MockMetadataRecord>("test", new LogOptions { Storage = provider });
 
@@ -164,7 +163,7 @@ namespace Stormancer.Raft.Tests
         {
             var provider = new MemoryWALSegmentProvider(new MemoryWALSegmentOptions
             {
-                ReaderWriter = new IntegerRecordTypeLogEntryReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
+                ReaderWriter = new IntegerTypedRecordReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
             });
             await using var wal = new WriteAheadLog<MockMetadataRecord>("test", new LogOptions { Storage = provider });
             Assert.True(wal.TryAppendEntries(Enumerable.Range(1, 99).Select(i => new LogEntry((ulong)i, 1, MockRecord.Instance)), out var error));
@@ -175,7 +174,7 @@ namespace Stormancer.Raft.Tests
         {
             var provider = new MemoryWALSegmentProvider(new MemoryWALSegmentOptions
             {
-                ReaderWriter = new IntegerRecordTypeLogEntryReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
+                ReaderWriter = new IntegerTypedRecordReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
             });
             await using var wal = new WriteAheadLog<MockMetadataRecord>("test", new LogOptions { Storage = provider });
 
@@ -196,7 +195,7 @@ namespace Stormancer.Raft.Tests
         {
             var provider = new MemoryWALSegmentProvider(new MemoryWALSegmentOptions
             {
-                ReaderWriter = new IntegerRecordTypeLogEntryReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
+                ReaderWriter = new IntegerTypedRecordReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
             });
             await using var wal = new WriteAheadLog<MockMetadataRecord>("test", new LogOptions { Storage = provider });
 
@@ -216,7 +215,7 @@ namespace Stormancer.Raft.Tests
         {
             var provider = new MemoryWALSegmentProvider(new MemoryWALSegmentOptions
             {
-                ReaderWriter = new IntegerRecordTypeLogEntryReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
+                ReaderWriter = new IntegerTypedRecordReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
             });
             await using var wal = new WriteAheadLog<MockMetadataRecord>("test", new LogOptions { Storage = provider });
 

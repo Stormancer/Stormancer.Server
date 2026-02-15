@@ -12,67 +12,7 @@ using System.Threading.Tasks;
 
 namespace Stormancer.Raft.Tests
 {
-    public class IncrementCommand : ICommand<IncrementCommand>
-    {
-        public Guid Id { get; } = Guid.NewGuid();
-
-
-        public IRecord Record { get; }
-
-        private IncrementCommand(IRecord systemRecord)
-        {
-            Record = systemRecord;
-        }
-
-        public static IncrementCommand Create(IRecord systemRecord)
-        {
-            return new IncrementCommand(systemRecord);
-        }
-
-        public TSystemCommandContent? As<TSystemCommandContent>() where TSystemCommandContent : class, IRecord<TSystemCommandContent>
-        {
-            return Record as TSystemCommandContent;
-        }
-    }
-    public class IncrementCommandResult : ICommandResult<IncrementCommandResult>
-    {
-        private IncrementCommandResult(Guid operationId, bool success, Error? error, int newValue, int entryId)
-        {
-            OperationId = operationId;
-            Success = success;
-            Error = error;
-            NewValue = newValue;
-            EntryId = entryId;
-        }
-        public Guid OperationId { get; }
-
-        public bool Success { get; }
-
-        public Error? Error { get; }
-
-        public int NewValue { get; }
-        public int EntryId { get; }
-
-        public static IncrementCommandResult CreateFailed(Guid operationId, Error error)
-        {
-            return new IncrementCommandResult(operationId, false, error, 0, 0);
-        }
-
-        public static bool TryRead(ReadOnlySequence<byte> buffer, out int bytesRead, [NotNullWhen(true)] out IncrementCommandResult? result)
-        {
-            throw new NotImplementedException();
-        }
-
-        public int GetLength()
-        {
-            throw new NotImplementedException();
-        }
-
-        public void Write(Span<byte> span)
-        {
-            throw new NotImplementedException();
-        }
-    }
+    
     public class OfflineRaftTests
     {
         [Fact]
@@ -82,9 +22,9 @@ namespace Stormancer.Raft.Tests
             using var logger = new NullLoggerFactory();
             var provider = new MemoryWALSegmentProvider(new MemoryWALSegmentOptions { ReaderWriter = readerWriter });
             var config = new ReplicatedStorageShardConfiguration {ReaderWriter = readerWriter };
-            var backend = new WalShardBackend<IncrementCommand, IncrementCommandResult>(provider);
+            var backend = new WalShardBackend(provider);
             var channel = new TestMessageChannel(() => 0);
-            var shard = new ReplicatedStorageShard<IncrementCommand, IncrementCommandResult>(Guid.Parse("62cb3c01-c215-4225-be3b-7e2d6c85c708"), config, logger, null, backend);
+            var shard = new ReplicatedStorageShard(Guid.Parse("62cb3c01-c215-4225-be3b-7e2d6c85c708"), config, logger, null, backend);
             Assert.True(await shard.ElectAsLeaderAsync());
 
 
@@ -97,9 +37,9 @@ namespace Stormancer.Raft.Tests
             using var logger = new NullLoggerFactory();
             var provider = new MemoryWALSegmentProvider(new MemoryWALSegmentOptions { ReaderWriter = readerWriter });
             var config = new ReplicatedStorageShardConfiguration { ReaderWriter = readerWriter };
-            var backend = new WalShardBackend<IncrementCommand, IncrementCommandResult>(provider);
+            var backend = new WalShardBackend(provider);
             var channel = new TestMessageChannel(() => 0);
-            var shard = new ReplicatedStorageShard<IncrementCommand, IncrementCommandResult>(Guid.Parse("62cb3c01-c215-4225-be3b-7e2d6c85c708"), config, logger, null, backend);
+            var shard = new ReplicatedStorageShard(Guid.Parse("62cb3c01-c215-4225-be3b-7e2d6c85c708"), config, logger, null, backend);
             await shard.ElectAsLeaderAsync();
             //var cmd = new IncrementCommand();
             //var result = await shard.ExecuteCommand(cmd);

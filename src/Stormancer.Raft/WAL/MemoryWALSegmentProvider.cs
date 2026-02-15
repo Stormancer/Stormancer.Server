@@ -20,7 +20,7 @@ namespace Stormancer.Raft.WAL
 
         public MemoryPool<byte> MemoryPool { get; init; } = MemoryPool<byte>.Shared;
 
-        public required ILogEntryReaderWriter ReaderWriter { get; init; }
+        public required IRecordReaderWriter ReaderWriter { get; init; }
     }
 
     class MemoryWALReadOnlySequenceSegment : ReadOnlySequenceSegment<byte>
@@ -286,7 +286,6 @@ namespace Stormancer.Raft.WAL
 
             public string Category { get; }
 
-            public bool IsEmpty => throw new NotImplementedException();
 
             public ValueTask DisposeAsync()
             {
@@ -423,12 +422,14 @@ namespace Stormancer.Raft.WAL
                 
                     ReadOnlySequence<byte> contentBuffer = new(content);
 
-                    if (_options.ReaderWriter.TryRead(header.EntryId, header.Term, contentBuffer, out entry))
+                    if (_options.ReaderWriter.TryRead(contentBuffer, out var record))
                     {
+                        entry = new LogEntry(header.EntryId, header.Term, record);
                         return true;
                     }
                     else
                     {
+                        entry = null;
                         return false;
                     }
                 }
@@ -588,10 +589,10 @@ namespace Stormancer.Raft.WAL
                 }
             }
 
-            public bool TryAppendEntry(LogEntry logEntry, ref int contentOffset, [NotNullWhen(false)] out ErrorId? error)
+            public bool TryAppendEntry(LogEntry logEntry, ref int contentOffset, [NotNullWhen(false)] out Error? error)
             {
                 var writer = _options.ReaderWriter;
-                var totalLength = writer.GetContentLength(logEntry);
+                var totalLength = writer.GetContentLength(logEntry.Record);
 
                 var remainingLength = totalLength - contentOffset;
 
@@ -599,20 +600,20 @@ namespace Stormancer.Raft.WAL
                 {
                     if (_readOnly)
                     {
-                        error = WalErrors.SegmentReadOnly;
+                        error =new Error(WalErrors.SegmentReadOnly,null);
                         return false;
                     }
 
                     if(remainingLength > _options.PageSize)
                     {
-                        error = WalErrors.ContentTooBig;
+                        error = new Error(WalErrors.ContentTooBig,null);
                         return false;
                     }
                     if (!_currentContentPage.CanAllocate(remainingLength)) //If current page is full, create new page.
                     {
                         if (!TryCreateNewContentPage())
                         {
-                            error = WalErrors.SegmentFull;
+                            error = new Error(WalErrors.SegmentFull,null);
                             return false;
                         }
                     }
@@ -622,7 +623,7 @@ namespace Stormancer.Raft.WAL
                     {
                         if (!TryCreateNewIndexPage())
                         {
-                            error = WalErrors.SegmentFull;
+                            error = new Error(WalErrors.SegmentFull,null);
                             return false;
                         }
 
@@ -633,9 +634,9 @@ namespace Stormancer.Raft.WAL
                     var span = _currentContentPage.GetSpan(length);
 
 
-                    if (!writer.TryWriteContent(ref span, logEntry, contentOffset, out var contentBytesWritten))
+                    if (!writer.TryWriteContent(span, logEntry.Record, out var contentBytesWritten))
                     {
-                        error = WalErrors.ContentWriteFailed;
+                        error = new Error(WalErrors.ContentWriteFailed,null);
                         return false;
                     }
                     remainingLength -= contentBytesWritten;
@@ -654,7 +655,7 @@ namespace Stormancer.Raft.WAL
                     span = _currentIndexPage.GetSpan(IndexRecord.Length);
                     if (!indexRecord.TryWrite(span))
                     {
-                        error = WalErrors.IndexWriteFailed;
+                        error = new Error(WalErrors.IndexWriteFailed,null);
                         return false;
                     }
 
@@ -673,7 +674,7 @@ namespace Stormancer.Raft.WAL
 
                     if (contentOffset != totalLength)
                     {
-                        error = WalErrors.ContentPartialWrite;
+                        error = new Error(WalErrors.ContentPartialWrite,null);
                         return false;
                     }
                     return true;
