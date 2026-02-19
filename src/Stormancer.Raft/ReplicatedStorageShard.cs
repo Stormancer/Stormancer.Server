@@ -4,6 +4,7 @@ using Stormancer.Raft;
 using Stormancer.Threading;
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Collections;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -298,7 +299,7 @@ namespace Stormancer.Raft
                         else
                         {
                             _lastPendingOperation.Next = op;
-                            op = _lastPendingOperation;
+                            _lastPendingOperation = op;
                         }
                         return op.ValueTaskOfT;
                     }
@@ -320,7 +321,7 @@ namespace Stormancer.Raft
                         lastAppliedCommit = state.Value.LastAppliedLogEntryId;
                     }
                 }
-                if(lastAppliedCommit == 0)
+                if (lastAppliedCommit == 0)
                 {
                     return;
                 }
@@ -332,6 +333,10 @@ namespace Stormancer.Raft
                     {
                         current.TrySetResult(false);
                         _firstPendingOperation = (AsyncOperationWithData<(ulong term, ulong entryId), bool>?)current.Next;
+                        if(_firstPendingOperation == null)
+                        {
+                            _lastPendingOperation = null;
+                        }
                         current = _firstPendingOperation;
 
                     }
@@ -339,6 +344,10 @@ namespace Stormancer.Raft
                     {
                         current.TrySetResult(true);
                         _firstPendingOperation = (AsyncOperationWithData<(ulong term, ulong entryId), bool>?)current.Next;
+                        if (_firstPendingOperation == null)
+                        {
+                            _lastPendingOperation = null;
+                        }
                         current = _firstPendingOperation;
                     }
                     else
@@ -460,25 +469,7 @@ namespace Stormancer.Raft
 
         private bool AppendEntriesToReplica(bool force)
         {
-            bool mustWait = false;
-            foreach (var server in _backend.CurrentShardsConfiguration.All)
-            {
-                if (server.Uid != ShardUid && IsShardConnected(server.Uid))
-                {
-                    var id = server.Uid;
-                    if (!_shardInstances.TryGetValue(id, out var state))
-                    {
-                        state = new ShardReplicaSynchronisationState(id, _backend.LastLogEntry);
-                        _shardInstances[id] = state;
-                    }
-                    mustWait = true;
-
-                    _ = AppendEntriesAsync(state);
-
-                }
-            }
-            return mustWait;
-
+            return ScheduleAppends();
         }
 
 
@@ -498,24 +489,47 @@ namespace Stormancer.Raft
                 return IsShardConnected(shardUid) && _backend.CurrentShardsConfiguration.IsVoting(shardUid);
             }
         }
+        private bool ScheduleAppends(int i = 0)
+        {
+            if(i > 50)
+            {
+                Debug.Assert(false);
+            }
+            bool scheduled = false;
+            lock (_syncRoot)
+            {
+                foreach (var server in _backend.CurrentShardsConfiguration.All)
+                {
+                    if (server.Uid != ShardUid && IsShardConnected(server.Uid))
+                    {
+                        if (!_shardInstances.TryGetValue(server.Uid, out var shardState))
+                        {
+                            shardState = new ShardReplicaSynchronisationState(server.Uid, _backend.LastLogEntry);
+                            _shardInstances[server.Uid] = shardState;
+                        }
+                        if (!shardState.AppendInProgress)
+                        {
+                            if (shardState.LastKnownReplicatedLogEntry < _backend.LastLogEntry || shardState.LastAppliedLogEntryId < _backend.LastAppliedLogEntry)
+                            {
+                                scheduled = true;
+                                _ = AppendEntriesAsync(shardState,i);
+                            }
 
+                        }
+                    }
+                }
+            }
+            return scheduled;
+        }
 
-        private async Task AppendEntriesAsync(ShardReplicaSynchronisationState state)
+        private async Task AppendEntriesAsync(ShardReplicaSynchronisationState state,int i)
         {
             if (_channel == null)
             {
                 return;
             }
-            lock (state.SyncRoot)
-            {
-                if (state.AppendInProgress)
-                {
-                    return;
-                }
-                state.AppendInProgress = true;
-            }
-            while (true)
-            {
+            
+               
 
 
                 lock (state.SyncRoot)
@@ -527,6 +541,16 @@ namespace Stormancer.Raft
 
 
 
+                }
+            try
+            {
+                lock (state.SyncRoot)
+                {
+                    if (state.AppendInProgress)
+                    {
+                        return;
+                    }
+                    state.AppendInProgress = true;
                 }
 
                 var targetId = state.ShardUid;
@@ -599,20 +623,19 @@ namespace Stormancer.Raft
                         }
                         state.NextLogEntryIdToSend = result.LastLogEntryId + 1;
                         TryCommit();
-                        if (state.LastKnownReplicatedLogEntry == _backend.LastLogEntry && state.LastAppliedLogEntryId == _backend.LastAppliedLogEntry)
-                        {
-                            state.AppendInProgress = false;
-                            return;
-                        }
+
 
                     }
                 }
             }
-
-
-
-
+            finally
+            {
+                state.AppendInProgress = false;
+                ScheduleAppends(++i);
+            }
         }
+
+
 
         private Task AppendEntries(ShardReplicaSynchronisationState state, bool force)
         {
@@ -852,7 +875,7 @@ namespace Stormancer.Raft
             {
                 try
                 {
-                    _logger.Log(LogLevel.Trace, "start commit {committed}/{lastEntryId}", _backend.LastAppliedLogEntry,_backend.LastLogEntry);
+                    _logger.Log(LogLevel.Trace, "start commit {committed}/{lastEntryId}", _backend.LastAppliedLogEntry, _backend.LastLogEntry);
                     var shardInstancesCount = _shardInstances.Count + 1;
                     var totalSynchronized = 0;
                     var total = 0;
@@ -903,7 +926,7 @@ namespace Stormancer.Raft
 
                     }
 
-                    ShardsReplicationLogging.LogFailedLocalCommitAttempt(_logger, _commitIndex,_backend.LastAppliedLogEntry,_backend.LastLogEntry, totalSynchronized, total);
+                    ShardsReplicationLogging.LogFailedLocalCommitAttempt(_logger, _commitIndex, _backend.LastAppliedLogEntry, _backend.LastLogEntry, totalSynchronized, total);
 
 
                     return false;

@@ -28,11 +28,11 @@ namespace Stormancer.Raft.Tests
         public async Task ElectLeader()
         {
             var readerWriter = new ReaderWriterBuilder().AddRecordType<MockRecord>().Create();
-          
 
+            var db = new MockDatabase();
             var provider = new MemoryWALSegmentProvider(new MemoryWALSegmentOptions { ReaderWriter = readerWriter });
             var config = new ReplicatedStorageShardConfiguration { ReaderWriter = readerWriter };
-            var backend = new WalShardBackend("backend",provider,_loggerFactory);
+            var backend = new WalShardBackend("backend",provider, db, _loggerFactory);
             var channel = new TestMessageChannel(() => 0);
             var shard = new ReplicatedStorageShard(GetId(0), config, _loggerFactory, null, backend);
             Assert.True(await shard.ElectAsLeaderAsync());
@@ -50,7 +50,8 @@ namespace Stormancer.Raft.Tests
             using var logger = new NullLoggerFactory();
             var provider = new MemoryWALSegmentProvider(new MemoryWALSegmentOptions { ReaderWriter = readerWriter });
             var config = new ReplicatedStorageShardConfiguration { ReaderWriter = readerWriter };
-            var backend = new WalShardBackend("backend",provider,_loggerFactory);
+            var db = new MockDatabase();
+            var backend = new WalShardBackend("backend",provider,db,_loggerFactory);
             var channel = new TestMessageChannel(() => 0);
             var shard = new ReplicatedStorageShard(GetId(0), config, logger, null, backend);
             await shard.ElectAsLeaderAsync();

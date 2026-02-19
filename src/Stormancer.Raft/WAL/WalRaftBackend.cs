@@ -59,23 +59,26 @@ namespace Stormancer.Raft.WAL
         public ulong CurrentTerm { get; set; }
     }
 
+    public interface IWalDatabase
+    {
+        bool TryApplyRecord(IRecord record);
+    }
+
     public class WalShardBackend : IStorageShardBackend
     {
 
         private readonly WriteAheadLog<RaftMetadata> _log;
         private readonly RaftMetadata _metadata;
-        //private readonly object _pendingOperationLock = new object();
-        //private AsyncOperationWithData<(Guid operationId, ulong term, ulong entryId), RaftCommandResult>? _firstPendingOperation;
-        //private AsyncOperationWithData<(Guid operationId, ulong term, ulong entryId), RaftCommandResult>? _lastPendingOperation;
-        //private static readonly DefaultObjectPool<AsyncOperationWithData<(Guid operationId, ulong term, ulong entryId), RaftCommandResult>> _defaultObjectPool = new(new AsyncOperationWithDataPoolPolicy<(Guid operationId, ulong term, ulong entryId), RaftCommandResult>());
        
         private readonly ILogger _logger;
+        private readonly IWalDatabase _database;
 
-        public WalShardBackend(string categoryName,IWALStorageProvider segmentProvider, ILoggerFactory loggerFactory)
+        public WalShardBackend(string categoryName,IWALStorageProvider segmentProvider, IWalDatabase database, ILoggerFactory loggerFactory)
         {
             _log = new WriteAheadLog<RaftMetadata>("content", new LogOptions { Storage = segmentProvider });
             _metadata = _log.Metadata ?? new RaftMetadata();
             _logger = loggerFactory.CreateLogger(categoryName);
+            _database = database;
         }
 
         public ulong LastAppliedLogEntry => _metadata.LastAppliedLogEntry;
@@ -109,35 +112,7 @@ namespace Stormancer.Raft.WAL
                 return new RaftCommandResult { Error = error };
             }
         }
-        //private ValueTask<RaftCommandResult> AddOperation(Guid operationId, ulong term, ulong logEntryId)
-        //{
-        //    var asyncOp = _defaultObjectPool.Get();
-           
-        //    while(!asyncOp.TryOwnAndReset())
-        //    {
-        //       asyncOp = _defaultObjectPool.Get();
-        //    }
-
-        //    asyncOp.Item = (operationId, term, logEntryId);
-
-        //    lock (_pendingOperationLock)
-        //    {
-        //        if (_lastPendingOperation != null)
-        //        {
-        //            _lastPendingOperation.Next = asyncOp;
-        //            _lastPendingOperation = asyncOp;
-
-        //        }
-        //        else
-        //        {
-        //            _firstPendingOperation = asyncOp;
-        //            _lastPendingOperation = asyncOp;
-        //        }
-        //    }
-
-        //    return asyncOp.ValueTaskOfT;
-        //}
-
+       
 
         public bool TryAppendEntries(IEnumerable<LogEntry> entries, [NotNullWhen(false)] out Error? error)
         {
@@ -230,6 +205,11 @@ namespace Stormancer.Raft.WAL
                         {
                             this.CurrentShardsConfiguration = shardConfigurationRecord;
                         }
+                        else if(entry.Record is not NoOpRecord)
+                        {
+                            _database.TryApplyRecord(entry.Record);
+                        }
+                       
                     }
                     lastAppliedLogEntry = result.LastEntryId;
 
