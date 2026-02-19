@@ -16,8 +16,6 @@ namespace Stormancer.Raft
     }
     public interface IRecord<T> : IRecord where T : IRecord<T>
     {
-
-        static abstract bool TryRead(ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out T? record, out int length);
         static abstract bool TryRead(ReadOnlySequence<byte> buffer,[NotNullWhen(true)] out T? record, out int length);
     }
 
@@ -51,27 +49,7 @@ namespace Stormancer.Raft
             }
         }
 
-        public bool TryRead(int recordType, ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out IRecord? entry, out int length)
-        {
-            if (recordType != typeId)
-            {
-                length = 0;
-                entry = null;
-                return false;
-            }
-
-
-            if (TRecord.TryRead(ref buffer, out var record, out length))
-            {
-                entry = record;
-                return true;
-            }
-            else
-            {
-                entry = null;
-                return false;
-            }
-        }
+       
 
         public bool TryWriteContent(ref Span<byte> buffer, IRecord record, out int length)
         {

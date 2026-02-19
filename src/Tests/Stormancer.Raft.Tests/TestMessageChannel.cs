@@ -7,7 +7,7 @@ using System.Threading.Tasks;
 
 namespace Stormancer.Raft.Tests
 {
-    internal class TestMessageChannel : IReplicatedStorageMessageChannel
+    internal class TestMessageChannel : IReplicatedStoreMessageChannel
     {
         MemoryPool<byte> _memoryPool = MemoryPool<byte>.Shared;
         private class ShardInstance
@@ -41,7 +41,7 @@ namespace Stormancer.Raft.Tests
 
         public async Task<AppendEntriesResult> AppendEntriesAsync(Guid origin, Guid destination, ulong term, IEnumerable<LogEntry> entries, ulong lastLeaderEntryId, ulong prevLogIndex, ulong prevLogTerm, ulong leaderCommit)
         {
-            if (_shards.TryGetValue(origin, out var shard))
+            if (_shards.TryGetValue(destination, out var shard))
             {
                 var latency = _latencyGenerator();
                 if (latency > 0)

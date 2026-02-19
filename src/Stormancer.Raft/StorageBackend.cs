@@ -19,7 +19,7 @@ namespace Stormancer.Raft
 
 
 
-        ValueTask<RaftCommandResult> TryAppendCommand(RaftCommand command);
+        RaftCommandResult TryAppendCommand(RaftCommand command);
         
         bool TryAppendEntries(IEnumerable<LogEntry> entries,[NotNullWhen(false)] out Error? error);
 

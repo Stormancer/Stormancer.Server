@@ -20,12 +20,6 @@ namespace Stormancer.Raft
             return true;
         }
 
-        public static bool TryRead(ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out NoOpRecord? record, out int length)
-        {
-            record = Instance;
-            length = 0;
-            return true;
-        }
 
         public int GetLength()
         {

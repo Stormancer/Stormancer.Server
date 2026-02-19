@@ -7,12 +7,13 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace Stormancer.Raft
 {
 
-  
+
     public class RaftCommand
     {
         public Guid Id { get; } = Guid.NewGuid();
@@ -144,7 +145,7 @@ namespace Stormancer.Raft
                 }
                 else
                 {
-                    bytesRead = read+33;
+                    bytesRead = read + 33;
                     cmdResult = null;
                     return false;
                 }
@@ -188,6 +189,7 @@ namespace Stormancer.Raft
             public DateTime LastAppendEntriesSentOn { get; set; } = DateTime.MinValue;
             public bool LastAppendSuccess { get; internal set; } = true;
             public bool AppendInProgress { get; internal set; } = false;
+            public ulong LastAppliedLogEntryId { get; internal set; }
 
             public object SyncRoot = new object();
         }
@@ -201,7 +203,7 @@ namespace Stormancer.Raft
         private ulong _commitIndex = 0;
         private Guid? _votedFor = null;
 
-        private readonly IReplicatedStorageMessageChannel? _channel;
+        private readonly IReplicatedStoreMessageChannel? _channel;
         private readonly IStorageShardBackend _backend;
 
         private readonly ReplicatedStorageShardConfiguration _config;
@@ -216,7 +218,7 @@ namespace Stormancer.Raft
         public ReplicatedStorageShard(Guid shardUid,
             ReplicatedStorageShardConfiguration config,
             ILoggerFactory logger,
-            IReplicatedStorageMessageChannel? channel,
+            IReplicatedStoreMessageChannel? channel,
             IStorageShardBackend backend
             )
         {
@@ -232,38 +234,130 @@ namespace Stormancer.Raft
 
 
 
-        public ValueTask<RaftCommandResult> ExecuteCommand(RaftCommand command,bool allowForwardToLeader = true)
+        public RaftCommandResult ExecuteCommand(RaftCommand command)
         {
-            ShardsReplicationLogging.LogStartProcessingCommand(_logger, command.Id);
+            ShardsReplicationLogging.LogStartProcessingCommand(_logger, command.Id, command.Record.GetType());
 
-            if (IsLeader)
+            if (IsLeader || _backend.CurrentShardsConfiguration.New == null)
             {
-                var task = _backend.TryAppendCommand(command);
-                if (!task.IsCompleted)
+                var result = _backend.TryAppendCommand(command);
+                if (result.Success)
                 {
-                   
+
                     if (!AppendEntriesToReplica(false))
                     {
                         //no replica, we should commit immediately.
                         TryCommit();
-                    }
-                    
 
+                    }
                 }
-                return task;
+
+                return result;
+
+
             }
             else
             {
-                return ForwardCommand(command);
+                return new RaftCommandResult { Error = new Error(RaftErrors.NotLEader, null), OperationId = command.Id };
             }
 
 
         }
-
-        private ValueTask<RaftCommandResult> ExecuteNoOp()
+        public ValueTask<bool> WaitCommitted(RaftCommandResult result) => WaitCommitted(result.Term, result.LogEntryId);
+        public ValueTask<bool> WaitCommitted(ulong term, ulong entryId)
         {
 
-            return ExecuteCommand(RaftCommand.Create(NoOpRecord.Instance),false);
+            if (_backend.CurrentTerm != term)
+            {
+                if (_backend.TryGetEntryTerm(entryId, out var entryTerm))
+                {
+                    return ValueTask.FromResult(false);
+                }
+                else
+                {
+                    return ValueTask.FromResult(entryTerm == term);
+                }
+            }
+            else
+            {
+                if (_backend.LastAppliedLogEntry >= entryId)
+                {
+                    return ValueTask.FromResult(true);
+                }
+                else
+                {
+                    lock (_pendingOperationsLock)
+                    {
+                        var op = new AsyncOperationWithData<(ulong term, ulong entryId), bool>(true);
+                        op.Item = (term, entryId);
+                        if (_lastPendingOperation == null)
+                        {
+                            _firstPendingOperation = op;
+                            _lastPendingOperation = op;
+                        }
+                        else
+                        {
+                            _lastPendingOperation.Next = op;
+                            op = _lastPendingOperation;
+                        }
+                        return op.ValueTaskOfT;
+                    }
+                }
+            }
+
+        }
+
+        private void ProcessCompletedOperations()
+        {
+            lock (_pendingOperationsLock)
+            {
+                var lastAppliedCommit = _backend.LastAppliedLogEntry;
+
+                foreach (var state in _shardInstances)
+                {
+                    if (state.Value.LastAppliedLogEntryId < lastAppliedCommit)
+                    {
+                        lastAppliedCommit = state.Value.LastAppliedLogEntryId;
+                    }
+                }
+                if(lastAppliedCommit == 0)
+                {
+                    return;
+                }
+                _logger.Log(LogLevel.Trace, "Processing completed operations. commit={lastAppliedCommit}[{term}]", lastAppliedCommit, _backend.CurrentTerm);
+                var current = _firstPendingOperation;
+                while (current != null)
+                {
+                    if (current.Item.term != _backend.CurrentTerm)
+                    {
+                        current.TrySetResult(false);
+                        _firstPendingOperation = (AsyncOperationWithData<(ulong term, ulong entryId), bool>?)current.Next;
+                        current = _firstPendingOperation;
+
+                    }
+                    else if (current.Item.entryId <= lastAppliedCommit)
+                    {
+                        current.TrySetResult(true);
+                        _firstPendingOperation = (AsyncOperationWithData<(ulong term, ulong entryId), bool>?)current.Next;
+                        current = _firstPendingOperation;
+                    }
+                    else
+                    {
+                        current = null;
+                    }
+
+                }
+            }
+        }
+        private readonly object _pendingOperationsLock = new object();
+        private AsyncOperationWithData<(ulong term, ulong entryId), bool>? _firstPendingOperation;
+        private AsyncOperationWithData<(ulong term, ulong entryId), bool>? _lastPendingOperation;
+
+
+        private RaftCommandResult ExecuteNoOp()
+        {
+
+            return ExecuteCommand(RaftCommand.Create(NoOpRecord.Instance));
         }
 
         public async ValueTask UpdateClusterConfiguration(IEnumerable<Server> newConfiguration)
@@ -279,16 +373,22 @@ namespace Stormancer.Raft
             }
 
 
-            var result = await UpdateClusterConfiguration(new ShardsConfigurationRecord(_backend.CurrentShardsConfiguration.New, [.. newConfiguration]));
-            if(!result.Success)
+            var result = UpdateClusterConfiguration(new ShardsConfigurationRecord(_backend.CurrentShardsConfiguration.New, [.. newConfiguration]));
+            await WaitCommitted(result);
+
+            if (!result.Success)
             {
                 throw new InvalidOperationException($"Failed to update cluster configuration : {result.Error}");
             }
-            result = await UpdateClusterConfiguration(new ShardsConfigurationRecord(null, [.. newConfiguration]));
 
-            if(!result.Success)
+            if (_backend.CurrentShardsConfiguration.Old != null)
             {
-                throw new InvalidOperationException($"Failed to update cluster configuration : {result.Error}");
+                result = UpdateClusterConfiguration(new ShardsConfigurationRecord(null, [.. newConfiguration]));
+                await WaitCommitted(result);
+                if (!result.Success)
+                {
+                    throw new InvalidOperationException($"Failed to update cluster configuration : {result.Error}");
+                }
             }
 
             if (!IsShardVoting(ShardUid))
@@ -297,34 +397,16 @@ namespace Stormancer.Raft
             }
         }
 
-        private ValueTask<RaftCommandResult> UpdateClusterConfiguration(ShardsConfigurationRecord record)
+        private RaftCommandResult UpdateClusterConfiguration(ShardsConfigurationRecord record)
         {
-            return ExecuteCommand(RaftCommand.Create(record), false);
-           
+            return ExecuteCommand(RaftCommand.Create(record));
+
         }
 
         private Dictionary<Guid, AsyncOperation<RaftCommandResult>> _forwardedCommands = new Dictionary<Guid, AsyncOperation<RaftCommandResult>>();
 
         private ObjectPool<AsyncOperation<RaftCommandResult>> _operationPool = new DefaultObjectPool<AsyncOperation<RaftCommandResult>>(new AsyncOperationPoolPolicy<RaftCommandResult>());
-        private ValueTask<RaftCommandResult> ForwardCommand(RaftCommand command)
-        {
-            if (IsLeader)
-            {
-                return ExecuteCommand(command);
-            }
-            else if (LeaderUid == null)
-            {
-                return ValueTask.FromResult(RaftCommandResult.CreateFailed(command.Id, new Error(RaftErrors.NotAvailable, null)));
-            }
-            else if (_channel != null)
-            {
-                return ForwardCommandImpl(command);
-            }
-            else
-            {
-                return ValueTask.FromResult(RaftCommandResult.CreateFailed(command.Id, new Error(RaftErrors.NotAvailable, "communication channel unavailable.")));
-            }
-        }
+
 
         private ValueTask<RaftCommandResult> ForwardCommandImpl(RaftCommand command)
         {
@@ -407,7 +489,7 @@ namespace Stormancer.Raft
 
         public bool IsShardVoting(Guid shardUid)
         {
-            if (ShardUid == shardUid && _channel == null)
+            if (ShardUid == shardUid && (_channel == null || _backend.CurrentShardsConfiguration.New == null))
             {
                 return true;
             }
@@ -477,9 +559,14 @@ namespace Stormancer.Raft
                     prevLogEntryTerm,
                     _commitIndex);
 
-
+                ShardsReplicationLogging.LogReceivedAppendEntriesResult(_logger, result.Success, targetId, result.Term, result.LastLogEntryId, result.LastAppliedLogEntryId);
                 lock (state.SyncRoot)
                 {
+                    if (state.LastAppliedLogEntryId < result.LastAppliedLogEntryId)
+                    {
+                        state.LastAppliedLogEntryId = result.LastAppliedLogEntryId;
+                        ProcessCompletedOperations();
+                    }
                     if (result.Term > _backend.CurrentTerm && LeaderUid != result.LeaderId && result.LeaderId != null)
                     {
 
@@ -501,6 +588,7 @@ namespace Stormancer.Raft
                     {
                         if (result.LastLogEntryId > state.LastKnownReplicatedLogEntry)
                         {
+                            _logger.Log(LogLevel.Debug, "Updated {shard} last known log entry from {lastLogEntryId} to {newLastLogEntryId}", state.ShardUid, state.LastKnownReplicatedLogEntry, result.LastLogEntryId);
                             state.LastKnownReplicatedLogEntry = result.LastLogEntryId;
                         }
 
@@ -510,8 +598,8 @@ namespace Stormancer.Raft
 
                         }
                         state.NextLogEntryIdToSend = result.LastLogEntryId + 1;
-
-                        if (!TryCommit() && state.LastKnownReplicatedLogEntry == _backend.LastLogEntry)
+                        TryCommit();
+                        if (state.LastKnownReplicatedLogEntry == _backend.LastLogEntry && state.LastAppliedLogEntryId == _backend.LastAppliedLogEntry)
                         {
                             state.AppendInProgress = false;
                             return;
@@ -596,7 +684,7 @@ namespace Stormancer.Raft
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private AppendEntriesResult CreateAppendEntriesResult(Guid dest, bool success)
         {
-            ShardsReplicationLogging.LogSendingAppendCommandResponse(_logger, dest, success, LeaderUid, _backend.CurrentTerm, _backend.LastLogEntry, _backend.LastAppliedLogEntry);
+            ShardsReplicationLogging.LogSendingAppendCommandResponse(_logger, ShardUid, dest, success, LeaderUid, _backend.CurrentTerm, _backend.LastLogEntry, _backend.LastAppliedLogEntry);
             return new AppendEntriesResult
             {
                 LeaderId = LeaderUid,
@@ -755,64 +843,87 @@ namespace Stormancer.Raft
 
         private bool TryCommit()
         {
+            if (_backend.LastLogEntry == _backend.LastAppliedLogEntry)
+            {
+                return false;
+            }
+
             lock (_syncRoot)
             {
-
-
-                var shardInstancesCount = _shardInstances.Count + 1;
-                for (var commitCandidate = _backend.LastLogEntry; commitCandidate > _backend.LastAppliedLogEntry; commitCandidate--)
+                try
                 {
+                    _logger.Log(LogLevel.Trace, "start commit {committed}/{lastEntryId}", _backend.LastAppliedLogEntry,_backend.LastLogEntry);
+                    var shardInstancesCount = _shardInstances.Count + 1;
                     var totalSynchronized = 0;
                     var total = 0;
-                    foreach (var shardInstance in _shardInstances.Values)
+                    for (var commitCandidate = _backend.LastLogEntry; commitCandidate > _backend.LastAppliedLogEntry; commitCandidate--)
                     {
-                        if (IsShardVoting(shardInstance.ShardUid))
+                        totalSynchronized = 0;
+                        total = 0;
+                        foreach (var shardInstance in _shardInstances.Values)
                         {
-                            total++;
-                            if (shardInstance.LastKnownReplicatedLogEntry >= commitCandidate)
+                            if (IsShardVoting(shardInstance.ShardUid))
                             {
-                                totalSynchronized++;
+                                total++;
+                                if (shardInstance.LastKnownReplicatedLogEntry >= commitCandidate)
+                                {
+                                    totalSynchronized++;
+                                }
                             }
                         }
+
+                        if (IsShardVoting(ShardUid))
+                        {
+                            total++;
+                            totalSynchronized++;
+                        }
+
+                        _logger.LogDebug("{commitCandidate} : {totalSynchronized}/{total}", commitCandidate, totalSynchronized, total);
+                        /*
+                         5.3
+                         * To eliminate problems like the one in Figure 8, Raft
+                        never commits log entries from previous terms by counting replicas. Only log entries from the leader’s current
+                        term are committed by counting replicas; once an entry
+                        from the current term has been committed in this way,
+                        then all prior entries are committed indirectly because
+                        of the Log Matching Property. There are some situations
+                        where a leader could safely conclude that an older log entry is committed (for example, if that entry is stored on every server), but Raft takes a more conservative approach
+                        for simplicity
+                         */
+                        if (totalSynchronized * 2 > total && _backend.TryGetEntryTerm(commitCandidate, out var term) && term == _backend.CurrentTerm)
+                        {
+                            this._commitIndex = commitCandidate;
+
+                            _backend.ApplyEntries(this._commitIndex);
+                            ProcessCompletedOperations();
+                            ShardsReplicationLogging.LogSuccessfulLocalCommitAttempt(_logger, _commitIndex, totalSynchronized, total);
+                            return true;
+                        }
+
+
                     }
 
-                    if (IsShardVoting(ShardUid))
-                    {
-                        total++;
-                        totalSynchronized++;
-                    }
-                    /*
-                     5.3
-                     * To eliminate problems like the one in Figure 8, Raft
-                    never commits log entries from previous terms by counting replicas. Only log entries from the leader’s current
-                    term are committed by counting replicas; once an entry
-                    from the current term has been committed in this way,
-                    then all prior entries are committed indirectly because
-                    of the Log Matching Property. There are some situations
-                    where a leader could safely conclude that an older log entry is committed (for example, if that entry is stored on every server), but Raft takes a more conservative approach
-                    for simplicity
-                     */
-                    if (totalSynchronized * 2 > total && _backend.TryGetEntryTerm(commitCandidate, out var term) && term == _backend.CurrentTerm)
-                    {
-                        this._commitIndex = commitCandidate;
-
-                        _backend.ApplyEntries(this._commitIndex);
-                        return true;
-                    }
+                    ShardsReplicationLogging.LogFailedLocalCommitAttempt(_logger, _commitIndex,_backend.LastAppliedLogEntry,_backend.LastLogEntry, totalSynchronized, total);
 
 
+                    return false;
                 }
-                return false;
+                catch (Exception ex)
+                {
+                    _logger.Log(LogLevel.Error, "Failed to apply entries {ex}", ex);
+                    return false;
+                }
+
             }
         }
 
 
-        public bool TryProcessForwardOperation(Guid originUid, ReadOnlySequence<byte> input, out int bytesRead)
+        bool IReplicatedStorageMessageHandler.TryProcessForwardOperation(Guid originUid, ReadOnlySequence<byte> input, out int bytesRead)
         {
             throw new NotImplementedException();
         }
 
-        public void ProcessForwardOperationResponse(Guid originUid, ReadOnlySequence<byte> responseInput, out int bytesRead)
+        void IReplicatedStorageMessageHandler.ProcessForwardOperationResponse(Guid originUid, ReadOnlySequence<byte> responseInput, out int bytesRead)
         {
             if (RaftCommandResult.TryRead(responseInput, out bytesRead, out var result) && _forwardedCommands.TryGetValue(result.OperationId, out var asyncOperation))
             {
@@ -833,7 +944,7 @@ namespace Stormancer.Raft
             LeaderUid = ShardUid;
 
             //Send an append entry command on election to trigger lease.
-           
+
             return true;
         }
 
@@ -860,6 +971,7 @@ namespace Stormancer.Raft
         }
 
         private AsyncOperation<bool>? _electAsLeaderOperation;
+
         public ValueTask<bool> ElectAsLeaderAsync()
         {
             if (LeaderUid == ShardUid)
@@ -871,14 +983,14 @@ namespace Stormancer.Raft
                 if (TrySetAsLeader())
                 {
                     var result = ExecuteNoOp();
-                    Debug.Assert(result.IsCompletedSuccessfully);
-                    return ValueTask.FromResult(true);
+
+                    return ValueTask.FromResult(result.Success);
                 }
                 else
                 {
                     return ValueTask.FromResult(false);
                 }
-               
+
             }
 
             if (!IsShardVoting(ShardUid))
@@ -919,12 +1031,13 @@ namespace Stormancer.Raft
 
                 var results = await Task.WhenAll(tasks);
                 bool elected = false;
+                var total = 1;
+                var votes = 1;
                 lock (_syncRoot)
                 {
                     if (LeaderUid == null)
                     {
-                        var total = 1;
-                        var votes = 1;
+
                         foreach (var result in results)
                         {
                             if (result.Term == _backend.CurrentTerm && result.RequestSuccess)
@@ -942,23 +1055,26 @@ namespace Stormancer.Raft
                         {
 
                             elected = TrySetAsLeader();
-                            
+
                         }
                         else
                         {
+                            ShardsReplicationLogging.ElectionCompleted(_logger, LeaderUid ?? Guid.Empty, false, votes, total);
                             operation.TrySetResult(false);
                         }
 
                     }
 
-                   
+
                     _electAsLeaderOperation = null;
                 }
 
                 if (elected)
                 {
-                    var r = await ExecuteNoOp();
-                    operation.TrySetResult(r.Success);
+                    ShardsReplicationLogging.ElectionCompleted(_logger, LeaderUid ?? Guid.Empty, true, votes, total);
+                    var result = ExecuteNoOp();
+                    var success = await WaitCommitted(result);
+                    operation.TrySetResult(success);
                 }
             }
 

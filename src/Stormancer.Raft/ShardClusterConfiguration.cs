@@ -39,8 +39,8 @@ namespace Stormancer.Raft
 
         public bool Equals(Server? other)
         {
-           if(other == null) return false;
-           return other.Uid == Uid;
+            if (other == null) return false;
+            return other.Uid == Uid;
         }
 
         public int GetLength()
@@ -50,7 +50,7 @@ namespace Stormancer.Raft
 
         public bool TryWrite(Span<byte> buffer, out int bytesWritten)
         {
-            if(buffer.Length < GetLength())
+            if (buffer.Length < GetLength())
             {
                 bytesWritten = 0;
                 return false;
@@ -63,15 +63,15 @@ namespace Stormancer.Raft
             return true;
         }
 
-        public static bool TryRead(ReadOnlySequence<byte> buffer,[NotNullWhen(true)] out Server? server, out int bytesRead)
+        public static bool TryRead(ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out Server? server, out int bytesRead)
         {
-            if(buffer.Length < 20)
+            if (buffer.Length < 20)
             {
                 server = null;
                 bytesRead = 0;
                 return false;
             }
-            
+
             var reader = new SequenceReader<byte>(buffer.Slice(16, 4));
 
             reader.TryReadBigEndian(out int length);
@@ -79,7 +79,7 @@ namespace Stormancer.Raft
             var guidBuffer = buffer.Slice(0, 16);
 
             Guid guid;
-            if(guidBuffer.IsSingleSegment)
+            if (guidBuffer.IsSingleSegment)
             {
                 guid = new Guid(guidBuffer.FirstSpan);
             }
@@ -108,7 +108,7 @@ namespace Stormancer.Raft
 
             Guid guid = new Guid(buffer[0..16]);
 
-            BinaryPrimitives.TryReadInt32BigEndian(buffer[16..20],out int length);
+            BinaryPrimitives.TryReadInt32BigEndian(buffer[16..20], out int length);
 
 
             byte[] data = new byte[length];
@@ -152,7 +152,26 @@ namespace Stormancer.Raft
             }
         }
 
-        public bool IsVoting(Guid shardUid) => All.Contains(new Server(shardUid));
+        public bool IsVoting(Guid shardUid)
+        {
+            var server = new Server(shardUid);
+            if (Old == null && New == null)
+            {
+                return true;
+            }
+            else if (Old != null && Old.Contains(server))
+            {
+                return true;
+            }
+            else if (New != null && New.Contains(server))
+            {
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        }
 
         public int GetLength()
         {
@@ -176,12 +195,12 @@ namespace Stormancer.Raft
             return length;
         }
 
-        public bool TryWrite(ref Span<byte> buffer,out int l)
+        public bool TryWrite(ref Span<byte> buffer, out int l)
         {
             l = GetLength();
             if (buffer.Length < GetLength())
             {
-                
+
                 return false;
             }
 
@@ -245,25 +264,22 @@ namespace Stormancer.Raft
 
             short oldCount = 0;
             short newCount = 0;
-            if (old != null)
+
+            if (!reader.TryReadBigEndian(out oldCount))
             {
-                if (!reader.TryReadBigEndian(out oldCount))
-                {
-                    config = default;
-                    bytesRead = 0;
-                    return false;
-                }
+                config = default;
+                bytesRead = 0;
+                return false;
             }
 
-            if (@new != null)
+
+            if (!reader.TryReadBigEndian(out newCount))
             {
-                if (!reader.TryReadBigEndian(out newCount))
-                {
-                    config = default;
-                    bytesRead = 0;
-                    return false;
-                }
+                config = default;
+                bytesRead = 0;
+                return false;
             }
+
 
 
             var offset = 5;
@@ -287,91 +303,9 @@ namespace Stormancer.Raft
             }
             if (@new != null)
             {
-                for (short i = 0; i < newCount; i++)
+                for (int i = 0; i < newCount; i++)
                 {
-
-                }
-                if (!Server.TryRead(buffer.Slice(offset), out var server, out var read))
-                {
-                    config = default;
-                    bytesRead = 0;
-                    return false;
-                }
-                else
-                {
-                    offset += read;
-                    @new.Add(server);
-                }
-            }
-
-            bytesRead = offset;
-            config = new ShardsConfigurationRecord(old, @new);
-            return true;
-
-        }
-
-        public static bool TryRead(ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out ShardsConfigurationRecord? config, out int bytesRead)
-        {
-
-            if (buffer.Length < 1)
-            {
-                config = default;
-                bytesRead = 0;
-                return false;
-            }
-            var flags = buffer[0];
-            HashSet<Server>? old = (flags & 1) != 0 ? new HashSet<Server>() : null;
-            HashSet<Server>? @new = (flags & 2) != 0 ? new HashSet<Server>() : null;
-
-            short oldCount = 0;
-            short newCount = 0;
-            if (old != null)
-            {
-                if (!BinaryPrimitives.TryReadInt16BigEndian(buffer[1..3], out oldCount))
-                {
-                    config = default;
-                    bytesRead = 0;
-                    return false;
-                }
-            }
-
-            if (@new != null)
-            {
-                if (!BinaryPrimitives.TryReadInt16BigEndian(buffer[3..5], out newCount))
-                {
-                    config = default;
-                    bytesRead = 0;
-                    return false;
-                }
-            }
-
-
-            var offset = 5;
-            if (old != null)
-            {
-
-                for (short i = 0; i < oldCount; i++)
-                {
-                    var contentBuffer = buffer.Slice(offset);
-                    if (!Server.TryRead(ref contentBuffer, out var server, out var read))
-                    {
-                        config = default;
-                        bytesRead = 0;
-                        return false;
-                    }
-                    else
-                    {
-                        offset += read;
-                        old.Add(server);
-                    }
-                }
-            }
-            if (@new != null)
-            {
-                for (short i = 0; i < newCount; i++)
-                {
-                    var contentBuffer = buffer.Slice(offset);
-                    if (!Server.TryRead(ref contentBuffer, out var server, out var read))
+                    if (!Server.TryRead(buffer.Slice(offset), out var server, out var read))
                     {
                         config = default;
                         bytesRead = 0;
@@ -383,7 +317,6 @@ namespace Stormancer.Raft
                         @new.Add(server);
                     }
                 }
-
             }
 
             bytesRead = offset;

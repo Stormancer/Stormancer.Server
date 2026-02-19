@@ -130,8 +130,7 @@ namespace Stormancer.Raft
 
         public bool TryRead(int recordType, ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out IRecord? entry, out int length);
 
-        public bool TryRead(int recordType, ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out IRecord? entry, out int length);
-
+    
         public bool TryWriteContent(ref Span<byte> buffer, IRecord entry, out int length);
 
 

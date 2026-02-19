@@ -8,19 +8,20 @@ using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using System.Xml;
 
 namespace Stormancer.Raft.Tests
 {
 
-    public class MockMetadataRecord : IRecord<MockMetadataRecord>
+    public class MockRecord : IRecord<MockRecord>
     {
-        public static bool TryRead(ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out MockMetadataRecord? record, out int length)
+        public static bool TryRead(ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out MockRecord? record, out int length)
         {
             length = 4;
             if (BinaryPrimitives.TryReadInt32BigEndian(buffer, out var value))
             {
 
-                record = new MockMetadataRecord { Value = value };
+                record = new MockRecord { Value = value };
                 return true;
 
             }
@@ -31,29 +32,20 @@ namespace Stormancer.Raft.Tests
             }
         }
 
-        public static bool TryRead(ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out MockMetadataRecord? record, out int length)
+        public static bool TryRead(ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out MockRecord? record, out int length)
         {
-
             length = 4;
-            if (buffer.Length >= 4)
+            var reader = new SequenceReader<byte>(buffer);
+            if (reader.TryReadBigEndian(out int value))
             {
-                if (buffer.FirstSpan.Length >= 4) //Fast path
-                {
-                    var span = buffer.FirstSpan;
-                    return TryRead(ref span, out record, out length);
-                }
-                else
-                {
-                    Span<byte> b = stackalloc byte[4];
-                    buffer.CopyTo(b);
-                    ReadOnlySpan<byte> bytes = b;
-                    return TryRead(ref bytes, out record, out length);
+                record = new MockRecord { Value = value };
 
-                }
+                return true;
             }
             else
             {
                 record = null;
+
                 return false;
             }
         }
@@ -92,19 +84,19 @@ namespace Stormancer.Raft.Tests
             {
                 ReaderWriter = new IntegerTypedRecordReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
             });
-            await using var wal = new WriteAheadLog<MockMetadataRecord>("test", new LogOptions { Storage = provider });
+            await using var wal = new WriteAheadLog<MockRecord>("test", new LogOptions { Storage = provider });
             ulong logEntryId = 1;
             for (ulong i = 1; i <= count; i++)
             {
 
                 Assert.True(wal.TryAppendEntries(Enumerable.Repeat(1, 10).Select(
-                _ => new LogEntry(logEntryId++, 1, MockRecord.Instance)), out var error));
+                _ => new LogEntry(logEntryId++, 1, new MockRecord())), out var error));
 
             }
 
             var header = wal.GetLastEntryHeader();
 
-            Assert.True(header.EntryId == 10*count);
+            Assert.True(header.EntryId == 10 * count);
 
         }
 
@@ -115,11 +107,11 @@ namespace Stormancer.Raft.Tests
             {
                 ReaderWriter = new IntegerTypedRecordReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
             });
-            await using var wal = new WriteAheadLog<MockMetadataRecord>("test", new LogOptions { Storage = provider });
+            await using var wal = new WriteAheadLog<MockRecord>("test", new LogOptions { Storage = provider });
 
             Assert.True(wal.TryAppendEntries(new[]{
-                new LogEntry(1,1, MockRecord.Instance),
-                new LogEntry(2,1, MockRecord.Instance),
+                new LogEntry(1,1, new MockRecord()),
+                new LogEntry(2,1,new MockRecord()),
             }, out var error));
 
             var header = wal.GetLastEntryHeader();
@@ -138,11 +130,11 @@ namespace Stormancer.Raft.Tests
             {
                 ReaderWriter = new IntegerTypedRecordReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
             });
-            await using var wal = new WriteAheadLog<MockMetadataRecord>("test", new LogOptions { Storage = provider });
+            await using var wal = new WriteAheadLog<MockRecord>("test", new LogOptions { Storage = provider });
 
             for (ulong i = 1; i <= count; i++)
             {
-                Assert.True(wal.TryAppendEntry(new LogEntry(i, 1, MockRecord.Instance), out var error));
+                Assert.True(wal.TryAppendEntry(new LogEntry(i, 1, new MockRecord()), out var error));
             }
 
 
@@ -165,9 +157,9 @@ namespace Stormancer.Raft.Tests
             {
                 ReaderWriter = new IntegerTypedRecordReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
             });
-            await using var wal = new WriteAheadLog<MockMetadataRecord>("test", new LogOptions { Storage = provider });
-            Assert.True(wal.TryAppendEntries(Enumerable.Range(1, 99).Select(i => new LogEntry((ulong)i, 1, MockRecord.Instance)), out var error));
-            Assert.False(wal.TryAppendEntries(Enumerable.Range(10, 200).Select(i => new LogEntry((ulong)i, 2, MockRecord.Instance)), out error));
+            await using var wal = new WriteAheadLog<MockRecord>("test", new LogOptions { Storage = provider });
+            Assert.True(wal.TryAppendEntries(Enumerable.Range(1, 99).Select(i => new LogEntry((ulong)i, 1, new MockRecord())), out var error));
+            Assert.False(wal.TryAppendEntries(Enumerable.Range(10, 200).Select(i => new LogEntry((ulong)i, 2, new MockRecord())), out error));
         }
         [Fact]
         public async Task PreviousEntryId()
@@ -176,11 +168,11 @@ namespace Stormancer.Raft.Tests
             {
                 ReaderWriter = new IntegerTypedRecordReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
             });
-            await using var wal = new WriteAheadLog<MockMetadataRecord>("test", new LogOptions { Storage = provider });
+            await using var wal = new WriteAheadLog<MockRecord>("test", new LogOptions { Storage = provider });
 
 
-            Assert.True(wal.TryAppendEntries(Enumerable.Range(1, 99).Select(i => new LogEntry((ulong)i, 1, MockRecord.Instance)), out var error));
-            Assert.True(wal.TryAppendEntries(Enumerable.Range(100, 200).Select(i => new LogEntry((ulong)i, 2, MockRecord.Instance)), out error));
+            Assert.True(wal.TryAppendEntries(Enumerable.Range(1, 99).Select(i => new LogEntry((ulong)i, 1, new MockRecord())), out var error));
+            Assert.True(wal.TryAppendEntries(Enumerable.Range(100, 200).Select(i => new LogEntry((ulong)i, 2, new MockRecord())), out error));
 
 
             var entries = await wal.GetEntriesAsync(100, 200);
@@ -197,11 +189,11 @@ namespace Stormancer.Raft.Tests
             {
                 ReaderWriter = new IntegerTypedRecordReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
             });
-            await using var wal = new WriteAheadLog<MockMetadataRecord>("test", new LogOptions { Storage = provider });
+            await using var wal = new WriteAheadLog<MockRecord>("test", new LogOptions { Storage = provider });
 
             for (ulong i = 1; i <= 10_000; i++)
             {
-                Assert.True(wal.TryAppendEntry(new LogEntry(i, 1, MockRecord.Instance), out var error));
+                Assert.True(wal.TryAppendEntry(new LogEntry(i, 1, new MockRecord()), out var error));
             }
 
             wal.TruncateAfter(100);
@@ -217,12 +209,12 @@ namespace Stormancer.Raft.Tests
             {
                 ReaderWriter = new IntegerTypedRecordReaderWriter([new IntegerTypedRecordLog<MockRecord>(0)])
             });
-            await using var wal = new WriteAheadLog<MockMetadataRecord>("test", new LogOptions { Storage = provider });
+            await using var wal = new WriteAheadLog<MockRecord>("test", new LogOptions { Storage = provider });
 
             for (ulong i = 1; i <= 10_000; i++)
             {
                 Assert.True(wal.TryAppendEntry(
-                 new LogEntry(i, 1, MockRecord.Instance), out var error));
+                 new LogEntry(i, 1, new MockRecord()), out var error));
             }
 
             wal.TruncateBefore(1000);

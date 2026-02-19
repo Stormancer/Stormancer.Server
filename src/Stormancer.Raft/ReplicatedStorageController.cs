@@ -37,7 +37,7 @@ namespace Stormancer.Raft
     }
 
 
-    public interface IReplicatedStorageMessageChannel
+    public interface IReplicatedStoreMessageChannel
     {
 
         

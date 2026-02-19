@@ -4,58 +4,6 @@ using System.Diagnostics.CodeAnalysis;
 
 namespace Stormancer.Raft.Tests
 {
-    public class MockRecord : IRecord<MockRecord>
-    {
-        public static MockRecord Instance { get; } = new MockRecord();
-
-        public static bool TryRead(ReadOnlySequence<byte> buffer, [NotNullWhen(true)] out MockRecord? record, out int length)
-        {
-            length = 10;
-            if (buffer.Length >= 10)
-            {
-                record = Instance;
-                return true;
-            }
-            else
-            {
-                record = null;
-                return false;
-            }
-        }
-
-        public static bool TryRead(ref ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out MockRecord? record, out int length)
-        {
-            length = 10;
-            if (buffer.Length >= 10)
-            {
-                record = Instance;
-                return true;
-            }
-            else
-            {
-                record = null;
-                return false;
-            }
-        }
-
-       
-
-        public int GetLength()
-        {
-            return 10;
-        }
-
-        public bool TryWrite(Span<byte> buffer)
-        {
-            return buffer.Length >= 10;
-        }
-
-        public bool TryWrite(ref Span<byte> buffer, out int length)
-        {
-            length = 10;
-            return buffer.Length >= 10;
-        }
-    }
 
     public class MetadataTests
     {

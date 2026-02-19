@@ -198,7 +198,7 @@ namespace Stormancer.Raft.WAL
             {
                 if (!_metadata.TryGetSegment(firstEntryId - 1, out var prevEntrySegmentId))
                 {
-                    throw new NotImplementedException("Snapshot");
+                    throw new NotImplementedException("previous entry not in the log, use snapshot?");
                 }
                 var prevEntrySegment = GetOrLoadSegment(prevEntrySegmentId);
                 var header = await prevEntrySegment.GetEntryHeader(firstEntryId - 1);
@@ -214,7 +214,7 @@ namespace Stormancer.Raft.WAL
 
             if (!_metadata.TryGetSegment(firstEntryId, out var firstEntrySegmentId))
             {
-                throw new NotImplementedException("Snapshot");
+                throw new NotImplementedException("first entry not in the log, use snapshot?");
             }
             var segment = GetOrLoadSegment(firstEntrySegmentId);
 

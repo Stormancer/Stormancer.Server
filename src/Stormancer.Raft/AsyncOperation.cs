@@ -487,13 +487,13 @@ namespace Stormancer.Threading
         public AsyncOperationWithData<TData, TResult> Create()
         {
             var op = new AsyncOperationWithData<TData, TResult>(true, default, true);
-            
+           
             return op;
         }
 
         public bool Return(AsyncOperationWithData<TData, TResult> obj)
         {
-            return obj.TryOwnAndReset();
+            return true;
         }
     }
 
