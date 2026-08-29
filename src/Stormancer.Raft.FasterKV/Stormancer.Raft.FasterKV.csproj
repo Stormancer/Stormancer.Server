@@ -2,13 +2,12 @@
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="DotNext.Net.Cluster" Version="5.0.2" />
-    <PackageReference Include="ZoneTree" Version="1.7.0" />
+    <PackageReference Include="MessagePack" Version="3.1.4" />
+    <PackageReference Include="Microsoft.FASTER.Core" Version="2.6.5" />
   </ItemGroup>
 
   <ItemGroup>
